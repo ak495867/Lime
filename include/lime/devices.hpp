@@ -118,13 +118,14 @@ public:
 
     std::string name() const override { return "VirtIO-GPU"; }
     uint64_t base_address() const override { return base_addr_; }
-    uint64_t size() const override { return 0x1000; }
+    uint64_t size() const override { return 0x400000; }
 
     uint32_t read(uint64_t offset, size_t size) override;
     void write(uint64_t offset, uint32_t value, size_t size) override;
 
     uint32_t width() const { return width_; }
     uint32_t height() const { return height_; }
+    const std::vector<uint32_t>& framebuffer() const { return framebuffer_; }
 
 private:
     uint64_t base_addr_;

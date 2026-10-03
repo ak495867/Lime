@@ -174,6 +174,11 @@ VirtIOGraphicsDevice::VirtIOGraphicsDevice(uint64_t base_addr) : base_addr_(base
 }
 
 uint32_t VirtIOGraphicsDevice::read(uint64_t offset, size_t) {
+    if (offset >= 0x1000) {
+        uint64_t fb_idx = (offset - 0x1000) / 4;
+        if (fb_idx < framebuffer_.size()) return framebuffer_[fb_idx];
+        return 0;
+    }
     switch (offset) {
     case 0x00: return 0x74726976;
     case 0x04: return 2;
@@ -185,6 +190,11 @@ uint32_t VirtIOGraphicsDevice::read(uint64_t offset, size_t) {
 }
 
 void VirtIOGraphicsDevice::write(uint64_t offset, uint32_t value, size_t) {
+    if (offset >= 0x1000) {
+        uint64_t fb_idx = (offset - 0x1000) / 4;
+        if (fb_idx < framebuffer_.size()) framebuffer_[fb_idx] = value;
+        return;
+    }
     switch (offset) {
     case 0x10:
         width_ = value;

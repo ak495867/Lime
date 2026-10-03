@@ -153,8 +153,47 @@ bool VCPU::step() {
 size_t VCPU::run_cycles(size_t max_cycles) {
     size_t executed = 0;
     while (executed < max_cycles && state_.load() == VCPUState::RUNNING) {
-        if (!step()) break;
-        executed++;
+        if (clint_) {
+            clint_->tick();
+            if (clint_->timer_interrupt_pending()) {
+                trigger_interrupt(0x8000000000000007ULL);
+            }
+        }
+        if (plic_ && plic_->external_interrupt_pending()) {
+            trigger_interrupt(0x800000000000000BULL);
+        }
+
+        uint64_t curr_pc = pc_;
+        bool fault = false;
+        
+        std::vector<uint32_t> block_insts;
+        uint64_t scan_pc = curr_pc;
+        for (int i=0; i<16; ++i) {
+            uint32_t inst = fetch32(scan_pc, fault);
+            if (fault) break;
+            block_insts.push_back(inst);
+            scan_pc += 4;
+            uint32_t op = inst & 0x7F;
+            if (op == 0x6F || op == 0x67 || op == 0x63 || op == 0x73) break;
+        }
+        
+        if (block_insts.empty()) {
+            if (fault) trigger_interrupt(12);
+            break;
+        }
+
+        const BasicBlock* bb = jit_->lookup_or_compile(curr_pc, block_insts);
+        if (bb) {
+            for (const auto& uop : bb->ops) {
+                pc_ += 4;
+                execute_instruction(uop.raw_inst);
+                executed++;
+                if (state_.load() != VCPUState::RUNNING) break;
+            }
+        } else {
+            if (!step()) break;
+            executed++;
+        }
     }
     return executed;
 }

@@ -52,16 +52,61 @@ bool X86CPUDecoder::step() {
     switch (opcode) {
     case 0x90:
         break;
-    case 0xB8: {
+    case 0xB8:
+    case 0xB9:
+    case 0xBA:
+    case 0xBB: {
         uint32_t val = mem_->read32(rip_);
         rip_ += 4;
-        set_gpr(0, val);
+        set_gpr(opcode - 0xB8, val);
         break;
     }
     case 0xEB: {
         int8_t rel = static_cast<int8_t>(mem_->read8(rip_));
         rip_++;
         rip_ += rel;
+        break;
+    }
+    case 0xE9: {
+        int32_t rel = static_cast<int32_t>(mem_->read32(rip_));
+        rip_ += 4;
+        rip_ += rel;
+        break;
+    }
+    case 0x50:
+    case 0x51:
+    case 0x52:
+    case 0x53: {
+        uint64_t val = get_gpr(opcode - 0x50);
+        uint64_t rsp = get_gpr(4) - 8;
+        set_gpr(4, rsp);
+        mem_->write64(rsp, val);
+        break;
+    }
+    case 0x58:
+    case 0x59:
+    case 0x5A:
+    case 0x5B: {
+        uint64_t rsp = get_gpr(4);
+        uint64_t val = mem_->read64(rsp);
+        set_gpr(opcode - 0x58, val);
+        set_gpr(4, rsp + 8);
+        break;
+    }
+    case 0x01: {
+        uint8_t modrm = mem_->read8(rip_);
+        rip_++;
+        uint8_t reg = (modrm >> 3) & 7;
+        uint8_t rm = modrm & 7;
+        set_gpr(rm, get_gpr(rm) + get_gpr(reg));
+        break;
+    }
+    case 0x29: {
+        uint8_t modrm = mem_->read8(rip_);
+        rip_++;
+        uint8_t reg = (modrm >> 3) & 7;
+        uint8_t rm = modrm & 7;
+        set_gpr(rm, get_gpr(rm) - get_gpr(reg));
         break;
     }
     case 0xF4:

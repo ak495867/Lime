@@ -57,7 +57,7 @@ bool VirtualMachine::init() {
         bus_->register_device(block_device_);
 
         if (config_.enable_nvme) {
-            nvme_ = std::make_shared<NVMeController>(disk_, 0x20000000);
+            nvme_ = std::make_shared<NVMeController>(disk_, memory_, 0x20000000);
             bus_->register_device(nvme_);
             if (pci_bus_) {
                 pci_bus_->attach_device(0, 4, 0, nvme_);

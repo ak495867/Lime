@@ -28,6 +28,7 @@ private:
     bool is_active_{false};
     uint16_t port_{8888};
     mutable std::mutex mutex_;
+    uint64_t sock_{0};
 };
 
 }
