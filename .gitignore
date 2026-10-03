@@ -6,3 +6,7 @@
 .vs/
 build/
 bin/
+
+# Compiled Linux/macOS binaries
+lime
+test_lime

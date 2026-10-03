@@ -36,10 +36,24 @@ The defining principle of LIME is **dynamic compute allocation**: give the virtu
 
 ## Installation & Building
 
+### 1. Install Pre-compiled Binaries (Recommended)
+
+**Linux / macOS (via curl):**
+```bash
+curl -fsSL https://github.com/ak495867/Lime/raw/main/install.sh | bash
+```
+
+**Windows (via PowerShell):**
+```powershell
+irm https://github.com/ak495867/Lime/raw/main/install.ps1 | iex
+```
+*(This script will download `lime.exe` and configure your PATH so you can run `lime` directly from any command prompt).*
+
+### 2. Manual Compilation from Source
+
 LIME requires a standard C++20 compiler (`g++`, `clang++`, or MSVC).
 
-### Compiling LIME CLI Executable
-
+**Compiling LIME CLI Executable:**
 ```powershell
 g++ -std=c++20 -Iinclude \
     src/memory.cpp src/storage.cpp src/cow_disk.cpp src/devices.cpp \
@@ -49,8 +63,7 @@ g++ -std=c++20 -Iinclude \
     -o lime.exe
 ```
 
-### Compiling Test Suite
-
+**Compiling Test Suite:**
 ```powershell
 g++ -std=c++20 -Iinclude \
     src/memory.cpp src/storage.cpp src/cow_disk.cpp src/devices.cpp \

@@ -1,0 +1,56 @@
+name: Release Build
+
+on:
+  release:
+    types: [created]
+
+jobs:
+  build:
+    name: Build on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact_name: lime
+            asset_name: lime-linux-amd64
+          - os: windows-latest
+            artifact_name: lime.exe
+            asset_name: lime-windows-amd64.exe
+          - os: macos-latest
+            artifact_name: lime
+            asset_name: lime-darwin-amd64
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build (Linux / macOS)
+        if: runner.os != 'Windows'
+        run: |
+          g++ -std=c++20 -O3 -Iinclude \
+              src/memory.cpp src/storage.cpp src/cow_disk.cpp src/devices.cpp \
+              src/interrupts.cpp src/mmu.cpp src/hypervisor.cpp src/net_bridge.cpp \
+              src/jit.cpp src/acpi.cpp src/pci.cpp src/firmware.cpp src/nvme.cpp \
+              src/x86_cpu.cpp src/vcpu.cpp src/scheduler.cpp src/vm.cpp src/cli.cpp src/main.cpp \
+              -o ${{ matrix.artifact_name }}
+
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          g++ -std=c++20 -O3 -Iinclude `
+              src/memory.cpp src/storage.cpp src/cow_disk.cpp src/devices.cpp `
+              src/interrupts.cpp src/mmu.cpp src/hypervisor.cpp src/net_bridge.cpp `
+              src/jit.cpp src/acpi.cpp src/pci.cpp src/firmware.cpp src/nvme.cpp `
+              src/x86_cpu.cpp src/vcpu.cpp src/scheduler.cpp src/vm.cpp src/cli.cpp src/main.cpp `
+              -lws2_32 -o ${{ matrix.artifact_name }}
+
+      - name: Upload Release Asset
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ github.event.release.upload_url }}
+          asset_path: ./${{ matrix.artifact_name }}
+          asset_name: ${{ matrix.asset_name }}
+          asset_content_type: application/octet-stream
