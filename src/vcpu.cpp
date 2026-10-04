@@ -220,6 +220,13 @@ void VCPU::execute_instruction(uint32_t inst) {
 
     uint64_t satp = get_csr(0x180);
 
+    // RISC-V 'C' (Compressed) extension: 16-bit instructions
+    // Compressed instructions have bits[1:0] != 11
+    if ((inst & 0x3) != 0x3) {
+        execute_compressed(static_cast<uint16_t>(inst & 0xFFFF));
+        return;
+    }
+
     switch (opcode) {
     case 0x37:
         set_reg(rd, static_cast<uint64_t>(imm_u));
@@ -360,6 +367,18 @@ void VCPU::execute_instruction(uint32_t inst) {
         break;
     }
 
+    case 0x0F: {
+        // RISC-V 'A' (Atomic) extension
+        // LR.W/LR.D: funct3 = 0x02/0x03, rs2 = 0
+        // SC.W/SC.D: funct3 = 0x02/0x03
+        if ((rs2 == 0) && (funct3 == 0x02 || funct3 == 0x03)) {
+            execute_lr(rd, rs1, funct3);
+        } else if (funct3 == 0x02 || funct3 == 0x03) {
+            execute_sc(rd, rs1, rs2, funct3);
+        }
+        break;
+    }
+
     case 0x73: {
         if (funct3 == 0) {
             if (imm_i == 0) {
@@ -384,9 +403,225 @@ void VCPU::execute_instruction(uint32_t inst) {
         break;
     }
 
+        default:
+        break;
+    }
+}
+
+void VCPU::execute_lr(uint32_t rd, uint32_t rs1, uint32_t funct3) {
+    bool fault = false;
+    uint64_t rs1_val = get_reg(rs1);
+    uint64_t pa = mmu_->translate(rs1_val, AccessType::READ, mode_, get_csr(0x180), fault);
+    if (fault) {
+        trigger_interrupt(13);
+        return;
+    }
+    uint64_t val = 0;
+    switch (funct3) {
+    case 0x02: val = mem_->read32(pa); break;  // LR.W
+    case 0x03: val = mem_->read64(pa); break;  // LR.D
+    default: return;
+    }
+    set_reg(rd, val);
+    lr_valid_ = true;
+    lr_addr_ = pa;
+}
+
+void VCPU::execute_sc(uint32_t rd, uint32_t rs1, uint32_t rs2, uint32_t funct3) {
+    bool fault = false;
+    uint64_t rs1_val = get_reg(rs1);
+    uint64_t pa = mmu_->translate(rs1_val, AccessType::WRITE, mode_, get_csr(0x180), fault);
+    if (fault) {
+        trigger_interrupt(15);
+        set_reg(rd, 1);  // SC failed
+        return;
+    }
+    if (lr_valid_ && lr_addr_ == pa) {
+        uint64_t val2 = get_reg(rs2);
+        switch (funct3) {
+        case 0x02: mem_->write32(pa, static_cast<uint32_t>(val2)); break;  // SC.W
+        case 0x03: mem_->write64(pa, val2); break;  // SC.D
+        default: break;
+        }
+        set_reg(rd, 0);  // SC succeeded
+        lr_valid_ = false;  // Reservation cleared after SC
+    } else {
+        set_reg(rd, 1);  // SC failed (address mismatch)
+    }
+}
+
+bool VCPU::execute_compressed(uint16_t inst) {
+    uint32_t opcode = (inst >> 13) & 0x07;
+    uint32_t rd_prime = (inst >> 7) & 0x07;
+    uint32_t rs1_prime = (inst >> 7) & 0x07;
+    uint32_t rs2_prime = (inst >> 2) & 0x07;
+
+    switch (opcode) {
+    case 0b000: {  // C.ADDI4SPN / C.NOP / C.ADDI
+        uint32_t imm3 = (inst >> 4) & 0x07;
+        uint32_t imm2 = (inst >> 6) & 0x01;
+        uint32_t imm1 = (inst >> 5) & 0x01;
+        uint32_t imm6 = (inst >> 11) & 0x01;
+        int32_t nzimm = (imm6 << 5) | (imm3 << 2) | (imm2 << 1) | imm1;
+        if (rd_prime == 0) break;  // C.NOP
+        int32_t rd = rd_prime + (rd_prime < 2 ? 8 : 0);
+        int32_t rs1 = rs1_prime + (rs1_prime < 2 ? 8 : 0);
+        if (rd == 2 && rs1 == 2) {
+            // C.ADDI4SPN
+            if (nzimm == 0) break;
+            set_reg(rd, get_reg(2) + static_cast<uint64_t>(nzimm));
+        } else {
+            set_reg(rd, get_reg(rs1) + static_cast<uint64_t>(nzimm));
+        }
+        break;
+    }
+    case 0b001: {  // C.LW / C.LDSP
+        uint32_t imm5 = (inst >> 5) & 0x01;
+        uint32_t imm4 = (inst >> 10) & 0x01;
+        uint32_t imm6 = (inst >> 6) & 0x01;
+        int32_t offset = (imm6 << 5) | (imm5 << 4) | (imm4 << 3) | ((inst >> 7) & 0x07);
+        if (offset & 0x40) offset |= ~0x7F;  // sign extend
+        uint64_t addr = get_reg(rs1_prime + 8) + static_cast<uint64_t>(offset);
+        bool fault = false;
+        uint64_t pa = mmu_->translate(addr, AccessType::READ, mode_, get_csr(0x180), fault);
+        if (!fault) {
+            set_reg(rd_prime + 8, mem_->read32(pa));
+        }
+        break;
+    }
+    case 0b100: {  // C.SW / C.SDSP / C.BEQZ / C.BNEZ / C.J / C.JAL
+        uint32_t funct2 = (inst >> 10) & 0x03;
+        if (funct2 == 0b00 || funct2 == 0b01) {  // C.SW / C.SDSP
+            uint32_t imm5 = (inst >> 5) & 0x01;
+            uint32_t imm4 = (inst >> 6) & 0x01;
+            uint32_t imm6 = (inst >> 10) & 0x01;
+            int32_t offset = (imm6 << 5) | (imm5 << 4) | (imm4 << 3) | ((inst >> 7) & 0x07);
+            if (offset & 0x40) offset |= ~0x7F;
+            uint32_t rs2 = rs2_prime + 8;
+            uint64_t addr = get_reg(rs1_prime + 8) + static_cast<uint64_t>(offset);
+            bool fault = false;
+            uint64_t pa = mmu_->translate(addr, AccessType::WRITE, mode_, get_csr(0x180), fault);
+            if (!fault) {
+                mem_->write32(pa, static_cast<uint32_t>(get_reg(rs2)));
+            }
+        } else if (funct2 == 0b10 || funct2 == 0b11) {  // C.BEQZ / C.BNEZ
+            uint32_t bimm4 = (inst >> 6) & 0x01;
+            uint32_t bimm3 = (inst >> 5) & 0x01;
+            uint32_t bimm6 = (inst >> 10) & 0x01;
+            uint32_t bimm5 = (inst >> 11) & 0x01;
+            int32_t boffset = (bimm6 << 5) | (bimm4 << 4) | (bimm3 << 3) | (bimm5 << 2) | ((inst >> 7) & 0x03);
+            if (boffset & 0x20) boffset |= ~0x3F;  // sign extend
+            uint64_t rs1_val = get_reg(rs1_prime + 8);
+            bool take = (funct2 == 0b10) ? (rs1_val == 0) : (rs1_val != 0);
+            if (take) {
+                pc_ = (pc_ - 2) + static_cast<uint64_t>(boffset);
+            }
+        }
+        break;
+    }
+    case 0b101: {  // C.J / C.JAL
+        uint32_t imm12 = (inst >> 12) & 0x01;
+        uint32_t imm11 = (inst >> 11) & 0x01;
+        uint32_t imm4 = (inst >> 4) & 0x01;
+        uint32_t imm9 = (inst >> 3) & 0x01;
+        uint32_t imm8 = (inst >> 10) & 0x01;
+        uint32_t imm7 = (inst >> 9) & 0x01;
+        uint32_t imm6 = (inst >> 8) & 0x01;
+        uint32_t imm5 = (inst >> 7) & 0x01;
+        int32_t imm = (imm12 << 11) | (imm11 << 10) | (imm4 << 9) | (imm9 << 8) |
+                      (imm8 << 7) | (imm7 << 6) | (imm6 << 5) | (imm5 << 4) |
+                      ((inst >> 6) & 0x01) << 3 | ((inst >> 10) & 0x01) << 2 |
+                      ((inst >> 5) & 0x01) << 1 | ((inst >> 1) & 0x01);
+        if (imm & 0x800) imm |= ~0xFFF;  // sign extend
+        if (opcode == 0b101 && rd_prime == 1) {  // C.JAL
+            set_reg(1, pc_ + 2);
+        }
+        pc_ = (pc_ - 2) + static_cast<uint64_t>(imm);
+        break;
+    }
+    case 0b110: {  // C.LI / C.LUI / C.ADDI16SP / C.SRLI / C.SRAI / C.ANDI / C.SUB / C.XOR / C.OR / C.AND
+        int32_t imm5 = static_cast<int32_t>(inst) >> 12;
+        uint32_t funct2 = (inst >> 10) & 0x03;
+        if (rd_prime == 0) {  // C.NOP (when imm5==0)
+            break;
+        }
+        uint32_t rd = rd_prime + (rd_prime < 2 ? 8 : 0);
+        if (funct2 == 0b00) {  // C.ADDI / C.NOP
+            int32_t nzimm = ((inst >> 12) & 0x01) ? ((inst >> 12) | ~0x1F) : ((inst >> 12) & 0x1F);
+            nzimm = (nzimm & 0x10) ? (nzimm | ~0x1F) : nzimm;  // sign-extend 5-bit
+            if (rd == 2 && rs1_prime == 2) {
+                // C.ADDI16SP
+                uint32_t nzimm16sp = ((inst >> 12) & 0x01) << 5 | ((inst >> 6) & 0x01) << 4 |
+                                     ((inst >> 5) & 0x01) << 3 | ((inst >> 3) & 0x01) << 2 |
+                                     ((inst >> 4) & 0x01) << 1 | ((inst >> 2) & 0x01);
+                if (nzimm16sp & 0x20) nzimm16sp |= ~0x3F;
+                set_reg(rd, get_reg(2) + static_cast<uint64_t>(nzimm16sp));
+            } else {
+                set_reg(rd, get_reg(rd) + static_cast<uint64_t>(imm5));
+            }
+        } else if (funct2 == 0b10) {  // C.SRLI / C.SRAI
+            uint32_t shamt = ((inst >> 11) & 0x01) << 5 | ((inst >> 7) & 0x1F);
+            uint32_t rs2 = rs2_prime + 8;
+            if ((inst >> 12) & 0x01) {
+                set_reg(rd, static_cast<uint64_t>(static_cast<int64_t>(get_reg(rs2)) >> shamt));
+            } else {
+                set_reg(rd, get_reg(rs2) >> shamt);
+            }
+        } else if (funct2 == 0b11) {  // C.ANDI
+            uint32_t rs2 = rs2_prime + 8;
+            int32_t simm5 = ((inst >> 12) & 0x01) ? ((inst >> 12) | ~0x1F) : ((inst >> 12) & 0x1F);
+            set_reg(rd, get_reg(rs2) & static_cast<uint64_t>(simm5));
+        } else if (funct2 == 0b01) {  // C.SUB / C.XOR / C.OR / C.AND
+            uint32_t rs2 = rs2_prime + 8;
+            uint32_t funct3_c = (inst >> 10) & 0x03;
+            switch (funct3_c) {
+            case 0b00: set_reg(rd, get_reg(rd) - get_reg(rs2)); break;  // C.SUB
+            case 0b01: set_reg(rd, get_reg(rd) ^ get_reg(rs2)); break;  // C.XOR
+            case 0b10: set_reg(rd, get_reg(rd) | get_reg(rs2)); break;  // C.OR
+            case 0b11: set_reg(rd, get_reg(rd) & get_reg(rs2)); break;  // C.AND
+            }
+        }
+        break;
+    }
+    case 0b111: {  // C.SUB / C.XOR / C.OR / C.AND (alternate encoding)
+        uint32_t funct3_c = (inst >> 10) & 0x03;
+        uint32_t rs1 = rs1_prime + 8;
+        uint32_t rs2 = rs2_prime + 8;
+        switch (funct3_c) {
+        case 0b00: set_reg(rs1_prime + 8, get_reg(rs1) - get_reg(rs2)); break;
+        case 0b01: set_reg(rs1_prime + 8, get_reg(rs1) ^ get_reg(rs2)); break;
+        case 0b10: set_reg(rs1_prime + 8, get_reg(rs1) | get_reg(rs2)); break;
+        case 0b11: set_reg(rs1_prime + 8, get_reg(rs1) & get_reg(rs2)); break;
+        }
+        break;
+    }
+    case 0b1000: {  // C.JR / C.MV / C.JALR / C.ADD
+        uint32_t funct3_c = (inst >> 12) & 0x07;
+        if (funct3_c == 0b000 && rs2_prime == 0) {  // C.JR
+            pc_ = get_reg(rs1_prime + 8);
+        } else if (funct3_c == 0b000) {  // C.MV
+            set_reg(rd_prime + 8, get_reg(rs2_prime + 8));
+        } else if (funct3_c == 0b001 && rs2_prime == 0) {  // C.JALR
+            uint64_t ra = get_reg(1);
+            pc_ = get_reg(rs1_prime + 8);
+            set_reg(1, pc_ + 2);
+        } else if (funct3_c == 0b001) {  // C.ADD
+            set_reg(rd_prime + 8, get_reg(rd_prime + 8) + get_reg(rs2_prime + 8));
+        }
+        break;
+    }
+    case 0b1001: {  // C.EBREAK (reserved)
+        if (rd_prime == 0 && rs1_prime == 0 && rs2_prime == 0) {
+            state_ = VCPUState::HALTED;
+        }
+        break;
+    }
     default:
         break;
     }
+
+    pc_ += 2;  // Compressed instructions are 2 bytes
+    return true;
 }
 
 }

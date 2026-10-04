@@ -6,6 +6,8 @@
 #include <vector>
 #include <fstream>
 #include <mutex>
+#include <list>
+#include <unordered_map>
 
 namespace lime {
 
@@ -24,7 +26,7 @@ class SparseDisk {
 public:
     static const uint32_t SECTOR_SIZE = 512;
 
-    SparseDisk() = default;
+    SparseDisk();
     ~SparseDisk();
 
     static bool create(const std::string& path, uint64_t capacity_bytes, uint32_t block_size = 65536);
@@ -50,6 +52,19 @@ private:
     std::vector<uint32_t> block_table_;
     mutable std::mutex mutex_;
     bool is_open_{false};
+
+    // LRU cache for frequently accessed blocks
+    static constexpr size_t LRU_CACHE_SIZE = 1024; // Cache up to 1024 blocks (64MB with 64KB blocks)
+    struct LRUCacheEntry {
+        uint32_t block_index;
+        uint32_t file_block_idx;
+        std::vector<char> data;
+        size_t access_count;
+        std::chrono::steady_clock::time_point last_access;
+    };
+    std::unordered_map<uint32_t, LRUCacheEntry> lru_cache_;
+    std::list<uint32_t> lru_list_; // For LRU eviction (most recent at front)
+    mutable std::mutex lru_mutex_;
 };
 
 }

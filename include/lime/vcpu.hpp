@@ -8,6 +8,7 @@
 #include <atomic>
 #include <mutex>
 #include <unordered_map>
+#include <functional>
 #include "lime/memory.hpp"
 #include "lime/devices.hpp"
 #include "lime/mmu.hpp"
@@ -62,8 +63,18 @@ public:
     void attach_clint(std::shared_ptr<ClintDevice> clint);
     void attach_plic(std::shared_ptr<PlicDevice> plic);
 
+    // RISC-V 'A' (Atomic) extension: LR/SC instructions
+    void execute_lr(uint32_t rd, uint32_t rs1, uint32_t funct3);
+    void execute_sc(uint32_t rd, uint32_t rs1, uint32_t rs2, uint32_t funct3);
+    bool lr_valid() const { return lr_valid_; }
+    uint64_t lr_addr() const { return lr_addr_; }
+
+    // RISC-V 'C' (Compressed) extension: 16-bit instructions
+    bool execute_compressed(uint16_t inst);
+
 private:
     uint32_t fetch32(uint64_t addr, bool& fault);
+    uint16_t fetch16(uint64_t addr, bool& fault);
     void execute_instruction(uint32_t inst);
 
     uint32_t id_;
@@ -83,6 +94,10 @@ private:
     VirtMode virt_mode_{VirtMode::SOFTWARE_INTERPRETER};
     uint64_t total_cycles_{0};
     mutable std::mutex mutex_;
+
+    // Atomic extension (LR/SC) state
+    bool lr_valid_{false};
+    uint64_t lr_addr_{0};
 };
 
 }

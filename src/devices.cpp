@@ -1,5 +1,7 @@
 #include "lime/devices.hpp"
 #include <iostream>
+#include <thread>
+#include <condition_variable>
 
 namespace lime {
 
@@ -74,6 +76,58 @@ std::string UartConsoleDevice::get_output_buffer() {
 VirtIOBlockDevice::VirtIOBlockDevice(std::shared_ptr<SparseDisk> disk, uint64_t base_addr)
     : disk_(disk), base_addr_(base_addr) {}
 
+VirtIOBlockDevice::~VirtIOBlockDevice() {
+    stop_worker();
+}
+
+void VirtIOBlockDevice::start_worker() {
+    if (worker_running_.load()) return;
+    worker_running_ = true;
+    worker_thread_ = std::thread([this]() {
+        while (worker_running_.load()) {
+            std::unique_lock<std::mutex> lock(req_mutex_);
+            cv_.wait(lock, [this]() {
+                return !pending_requests_.empty() || !worker_running_.load();
+            });
+            if (!worker_running_.load()) break;
+            if (pending_requests_.empty()) continue;
+
+            AsyncRequest req = pending_requests_.front();
+            pending_requests_.pop();
+            lock.unlock();
+
+            bool ok = false;
+            if (req.op == AsyncRequest::OpType::READ) {
+                ok = disk_->read_sectors(req.lba, req.sector_count, req.buffer);
+            } else {
+                ok = disk_->write_sectors(req.lba, req.sector_count, req.buffer);
+            }
+            if (req.callback) req.callback(ok);
+        }
+    });
+}
+
+void VirtIOBlockDevice::stop_worker() {
+    if (!worker_running_.load()) return;
+    worker_running_ = false;
+    cv_.notify_all();
+    if (worker_thread_.joinable()) {
+        worker_thread_.join();
+    }
+}
+
+void VirtIOBlockDevice::submit_async_read(uint64_t lba, uint32_t sector_count, void* buffer, std::function<void(bool)> callback) {
+    std::lock_guard<std::mutex> lock(req_mutex_);
+    pending_requests_.push({AsyncRequest::OpType::READ, lba, sector_count, buffer, callback});
+    cv_.notify_one();
+}
+
+void VirtIOBlockDevice::submit_async_write(uint64_t lba, uint32_t sector_count, const void* buffer, std::function<void(bool)> callback) {
+    std::lock_guard<std::mutex> lock(req_mutex_);
+    pending_requests_.push({AsyncRequest::OpType::WRITE, lba, sector_count, const_cast<void*>(buffer), callback});
+    cv_.notify_one();
+}
+
 uint32_t VirtIOBlockDevice::read(uint64_t offset, size_t) {
     switch (offset) {
     case 0x00: return 0x74726976;
@@ -105,6 +159,52 @@ void VirtIOBlockDevice::write(uint64_t offset, uint32_t value, size_t) {
 }
 
 VirtIONetDevice::VirtIONetDevice(uint64_t base_addr) : base_addr_(base_addr) {}
+
+VirtIONetDevice::~VirtIONetDevice() {
+    stop_worker();
+}
+
+void VirtIONetDevice::start_worker() {
+    if (worker_running_.load()) return;
+    worker_running_ = true;
+    worker_thread_ = std::thread([this]() {
+        while (worker_running_.load()) {
+            std::unique_lock<std::mutex> lock(frame_mutex_);
+            cv_.wait(lock, [this]() {
+                return !pending_frames_.empty() || !worker_running_.load();
+            });
+            if (!worker_running_.load()) break;
+            if (pending_frames_.empty()) continue;
+
+            AsyncFrame frame = pending_frames_.front();
+            pending_frames_.pop();
+            lock.unlock();
+
+            // Simulate network frame transmission (in a real implementation, this would send over a socket)
+            bool ok = true;
+            if (ok) {
+                packets_sent_++;
+                packets_recv_++;  // Echo for simplicity
+            }
+            if (frame.callback) frame.callback(ok);
+        }
+    });
+}
+
+void VirtIONetDevice::stop_worker() {
+    if (!worker_running_.load()) return;
+    worker_running_ = false;
+    cv_.notify_all();
+    if (worker_thread_.joinable()) {
+        worker_thread_.join();
+    }
+}
+
+void VirtIONetDevice::send_frame_async(const std::vector<uint8_t>& frame, std::function<void(bool)> callback) {
+    std::lock_guard<std::mutex> lock(frame_mutex_);
+    pending_frames_.push({frame, callback});
+    cv_.notify_one();
+}
 
 uint32_t VirtIONetDevice::read(uint64_t offset, size_t) {
     switch (offset) {

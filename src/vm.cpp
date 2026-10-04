@@ -85,10 +85,15 @@ bool VirtualMachine::init() {
         x86_vcpu_ = std::make_shared<X86CPUDecoder>(memory_, bus_);
         x86_vcpu_->reset(0x7C00);
     } else {
-        vcpu_ = std::make_shared<VCPU>(0, memory_, bus_);
-        vcpu_->attach_clint(clint_);
-        vcpu_->attach_plic(plic_);
-        vcpu_->reset(entry_point_);
+        // Create one VCPU per CPU core for true SMP (multi-core) execution
+        for (uint32_t i = 0; i < config_.cpu_count; ++i) {
+            auto vcpu = std::make_shared<VCPU>(i, memory_, bus_);
+            vcpu->attach_clint(clint_);
+            vcpu->attach_plic(plic_);
+            vcpu->reset(entry_point_);
+            vcpus_.push_back(vcpu);
+            if (i == 0) vcpu_ = vcpu;  // primary VCPU for legacy access
+        }
     }
 
     hypervisor_ = std::make_shared<HostHypervisor>();
@@ -109,9 +114,10 @@ bool VirtualMachine::init() {
 bool VirtualMachine::load_binary(const std::vector<uint8_t>& code, uint64_t load_addr) {
     if (!memory_) return false;
     entry_point_ = load_addr;
-    if (vcpu_) {
-        vcpu_->reset(entry_point_);
-    } else if (x86_vcpu_) {
+    for (auto& vcpu : vcpus_) {
+        vcpu->reset(entry_point_);
+    }
+    if (x86_vcpu_) {
         x86_vcpu_->reset(load_addr);
     }
     return memory_->write_bytes(load_addr, code.data(), code.size());
@@ -155,24 +161,30 @@ void VirtualMachine::run() {
                 break;
             }
         } else {
-            if (vcpu_->state() == VCPUState::HALTED) {
-                break;
-            }
-
-            bool was_idle = (vcpu_->state() == VCPUState::IDLE_WAIT);
-            if (!was_idle) {
-                size_t executed = vcpu_->run_cycles(batch_cycles);
-                if (executed == 0) {
-                    was_idle = true;
+            // Execute all VCPUs for SMP (multi-core) support
+            for (auto& vcpu : vcpus_) {
+                if (vcpu->state() == VCPUState::HALTED) {
+                    break;
                 }
-            }
 
-            scheduler_->notify_cycle(was_idle);
-            bus_->tick_all();
+                bool was_idle = (vcpu->state() == VCPUState::IDLE_WAIT);
+                if (!was_idle) {
+                    size_t executed = vcpu->run_cycles(batch_cycles);
+                    if (executed == 0) {
+                        was_idle = true;
+                    }
+                }
 
-            uint32_t sleep_ms = scheduler_->calculate_sleep_duration_ms();
-            if (sleep_ms > 0) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
+                if (scheduler_) {
+                    scheduler_->notify_cycle(was_idle);
+                }
+
+                bus_->tick_all();
+
+                uint32_t sleep_ms = scheduler_->calculate_sleep_duration_ms();
+                if (sleep_ms > 0) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
+                }
             }
         }
     }
@@ -185,6 +197,9 @@ void VirtualMachine::run() {
 
 void VirtualMachine::stop() {
     running_ = false;
+    for (auto& vcpu : vcpus_) {
+        vcpu->set_state(VCPUState::HALTED);
+    }
     if (vcpu_) {
         vcpu_->set_state(VCPUState::HALTED);
     }
@@ -210,6 +225,8 @@ std::shared_ptr<X86CPUDecoder> VirtualMachine::x86_vcpu() const { return x86_vcp
 std::shared_ptr<ResourceScheduler> VirtualMachine::scheduler() const { return scheduler_; }
 std::shared_ptr<HostHypervisor> VirtualMachine::hypervisor() const { return hypervisor_; }
 const VMConfig& VirtualMachine::config() const { return config_; }
+
+std::vector<std::shared_ptr<VCPU>> VirtualMachine::vcpus() const { return vcpus_; }
 
 std::vector<uint8_t> LimeImageBuilder::generate_mini_os_code() {
     std::vector<uint32_t> insts = {

@@ -7,6 +7,10 @@
 #include <memory>
 #include <queue>
 #include <mutex>
+#include <thread>
+#include <condition_variable>
+#include <atomic>
+#include <functional>
 #include "lime/storage.hpp"
 #include "lime/memory.hpp"
 
@@ -53,7 +57,7 @@ private:
 class VirtIOBlockDevice : public Device {
 public:
     VirtIOBlockDevice(std::shared_ptr<SparseDisk> disk, uint64_t base_addr = 0x10001000);
-    ~VirtIOBlockDevice() override = default;
+    ~VirtIOBlockDevice() override;
 
     std::string name() const override { return "VirtIO-Block"; }
     uint64_t base_address() const override { return base_addr_; }
@@ -62,18 +66,39 @@ public:
     uint32_t read(uint64_t offset, size_t size) override;
     void write(uint64_t offset, uint32_t value, size_t size) override;
 
+    // Asynchronous I/O support
+    void start_worker();
+    void stop_worker();
+    void submit_async_read(uint64_t lba, uint32_t sector_count, void* buffer, std::function<void(bool)> callback = nullptr);
+    void submit_async_write(uint64_t lba, uint32_t sector_count, const void* buffer, std::function<void(bool)> callback = nullptr);
+
 private:
     std::shared_ptr<SparseDisk> disk_;
     uint64_t base_addr_;
     uint32_t status_{0};
     uint64_t current_lba_{0};
     uint32_t sector_count_{0};
+
+    struct AsyncRequest {
+        enum class OpType { READ, WRITE };
+        OpType op;
+        uint64_t lba;
+        uint32_t sector_count;
+        void* buffer;
+        std::function<void(bool)> callback;
+    };
+
+    std::queue<AsyncRequest> pending_requests_;
+    std::mutex req_mutex_;
+    std::thread worker_thread_;
+    std::atomic<bool> worker_running_{false};
+    std::condition_variable cv_;
 };
 
 class VirtIONetDevice : public Device {
 public:
     explicit VirtIONetDevice(uint64_t base_addr = 0x10002000);
-    ~VirtIONetDevice() override = default;
+    ~VirtIONetDevice() override;
 
     std::string name() const override { return "VirtIO-Net"; }
     uint64_t base_address() const override { return base_addr_; }
@@ -81,6 +106,11 @@ public:
 
     uint32_t read(uint64_t offset, size_t size) override;
     void write(uint64_t offset, uint32_t value, size_t size) override;
+
+    // Asynchronous I/O support
+    void start_worker();
+    void stop_worker();
+    void send_frame_async(const std::vector<uint8_t>& frame, std::function<void(bool)> callback = nullptr);
 
     uint64_t packets_sent() const { return packets_sent_; }
     uint64_t packets_recv() const { return packets_recv_; }
@@ -90,6 +120,17 @@ private:
     uint32_t status_{0};
     uint64_t packets_sent_{0};
     uint64_t packets_recv_{0};
+
+    struct AsyncFrame {
+        std::vector<uint8_t> data;
+        std::function<void(bool)> callback;
+    };
+
+    std::queue<AsyncFrame> pending_frames_;
+    std::mutex frame_mutex_;
+    std::thread worker_thread_;
+    std::atomic<bool> worker_running_{false};
+    std::condition_variable cv_;
 };
 
 class VirtIOBalloonDevice : public Device {

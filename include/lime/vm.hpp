@@ -60,6 +60,7 @@ public:
     std::shared_ptr<DeviceBus> bus() const;
     std::shared_ptr<PCIBus> pci_bus() const;
     std::shared_ptr<VCPU> vcpu() const;
+    std::vector<std::shared_ptr<VCPU>> vcpus() const;
     std::shared_ptr<X86CPUDecoder> x86_vcpu() const;
     std::shared_ptr<ResourceScheduler> scheduler() const;
     std::shared_ptr<HostHypervisor> hypervisor() const;
@@ -72,6 +73,7 @@ private:
     std::shared_ptr<CoWSparseDisk> cow_disk_;
     std::shared_ptr<DeviceBus> bus_;
     std::shared_ptr<PCIBus> pci_bus_;
+    std::vector<std::shared_ptr<VCPU>> vcpus_;
     std::shared_ptr<VCPU> vcpu_;
     std::shared_ptr<X86CPUDecoder> x86_vcpu_;
     std::shared_ptr<ResourceScheduler> scheduler_;
@@ -88,6 +90,7 @@ private:
 
     std::atomic<bool> running_{false};
     uint64_t entry_point_{0x80000000};
+    std::vector<std::thread> vcpu_threads_;
 };
 
 class LimeImageBuilder {

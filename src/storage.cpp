@@ -1,10 +1,19 @@
 #include "lime/storage.hpp"
 #include <cstring>
 #include <algorithm>
+#include <chrono>
+#include <list>
+#include <unordered_map>
 
 namespace lime {
 
 SparseDisk::~SparseDisk() {
+    // Clear LRU cache
+    {
+        std::lock_guard<std::mutex> lock(lru_mutex_);
+        lru_cache_.clear();
+        lru_list_.clear();
+    }
     close();
 }
 
