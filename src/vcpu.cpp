@@ -362,14 +362,89 @@ void VCPU::execute_instruction(uint32_t inst) {
         break;
     }
 
-    case 0x0F: {
-
-
-
-        if ((rs2 == 0) && (funct3 == 0x02 || funct3 == 0x03)) {
+    case 0x0F: break;
+    case 0x07: { 
+        bool fault = false;
+        uint64_t pa = mmu_->translate(get_reg(rs1) + imm_i, AccessType::READ, mode_, csrs_[0x180], fault);
+        if (!fault) {
+            if (funct3 == 3) { 
+                uint64_t val = mem_->read64(pa);
+                std::memcpy(&fregs_[rd], &val, sizeof(double));
+            } else if (funct3 == 2) { 
+                uint32_t val = mem_->read32(pa);
+                float fval; std::memcpy(&fval, &val, sizeof(float));
+                fregs_[rd] = static_cast<double>(fval);
+            }
+        }
+        break;
+    }
+    case 0x27: { 
+        bool fault = false;
+        uint64_t pa = mmu_->translate(get_reg(rs1) + imm_s, AccessType::WRITE, mode_, csrs_[0x180], fault);
+        if (!fault) {
+            if (funct3 == 3) { 
+                uint64_t val; std::memcpy(&val, &fregs_[rs2], sizeof(double));
+                mem_->write64(pa, val);
+            } else if (funct3 == 2) { 
+                float fval = static_cast<float>(fregs_[rs2]);
+                uint32_t val; std::memcpy(&val, &fval, sizeof(float));
+                mem_->write32(pa, val);
+            }
+        }
+        break;
+    }
+    case 0x53: { 
+        uint32_t fmt = (inst >> 25) & 0x3; 
+        uint32_t op = (inst >> 27) & 0x1F;
+        if (fmt == 1) { 
+            switch(op) {
+                case 0x00: fregs_[rd] = fregs_[rs1] + fregs_[rs2]; break; 
+                case 0x01: fregs_[rd] = fregs_[rs1] - fregs_[rs2]; break; 
+                case 0x02: fregs_[rd] = fregs_[rs1] * fregs_[rs2]; break; 
+                case 0x03: fregs_[rd] = fregs_[rs1] / fregs_[rs2]; break; 
+                case 0x21: 
+                    fregs_[rd] = static_cast<double>(static_cast<int32_t>(get_reg(rs1))); break;
+                case 0x31: 
+                    set_reg(rd, static_cast<int32_t>(fregs_[rs1])); break;
+            }
+        }
+        break;
+    }
+    case 0x2F: { 
+        uint32_t funct5 = (inst >> 27) & 0x1F;
+        if (funct5 == 0x02) {
             execute_lr(rd, rs1, funct3);
-        } else if (funct3 == 0x02 || funct3 == 0x03) {
+        } else if (funct5 == 0x03) {
             execute_sc(rd, rs1, rs2, funct3);
+        } else {
+            bool fault = false;
+            uint64_t va = get_reg(rs1);
+            uint64_t pa = mmu_->translate(va, AccessType::WRITE, mode_, csrs_[0x180], fault);
+            if (!fault) {
+                static std::mutex amo_mutex;
+                std::lock_guard<std::mutex> lock(amo_mutex);
+                
+                uint64_t old_val = (funct3 == 3) ? mem_->read64(pa) : static_cast<int32_t>(mem_->read32(pa));
+                uint64_t src_val = get_reg(rs2);
+                uint64_t new_val = 0;
+                
+                switch(funct5) {
+                    case 0x00: new_val = old_val + src_val; break; 
+                    case 0x01: new_val = src_val; break; 
+                    case 0x04: new_val = old_val ^ src_val; break; 
+                    case 0x08: new_val = old_val | src_val; break; 
+                    case 0x0C: new_val = old_val & src_val; break; 
+                    case 0x10: new_val = (static_cast<int64_t>(old_val) < static_cast<int64_t>(src_val)) ? old_val : src_val; break; 
+                    case 0x14: new_val = (static_cast<int64_t>(old_val) > static_cast<int64_t>(src_val)) ? old_val : src_val; break; 
+                    case 0x18: new_val = (old_val < src_val) ? old_val : src_val; break; 
+                    case 0x1C: new_val = (old_val > src_val) ? old_val : src_val; break; 
+                }
+                
+                if (funct3 == 3) mem_->write64(pa, new_val);
+                else mem_->write32(pa, static_cast<uint32_t>(new_val));
+                
+                set_reg(rd, old_val);
+            }
         }
         break;
     }
@@ -699,4 +774,5 @@ void VCPU::compile_block(BasicBlock& bb) {
 }
 
 }
+
 

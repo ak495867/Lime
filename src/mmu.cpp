@@ -193,15 +193,63 @@ bool MMU::walk_x86_4level(uint64_t va, AccessType access, PrivilegeMode mode, ui
 }
 
 bool MMU::walk_x86_5level(uint64_t va, AccessType access, PrivilegeMode mode, uint64_t cr3, uint64_t& out_pa, PageFaultInfo& fault_info) {
+    uint64_t pml5_idx = (va >> 48) & 0x1FF;
+    uint64_t pml4_idx = (va >> 39) & 0x1FF;
+    uint64_t pdpt_idx = (va >> 30) & 0x1FF;
+    uint64_t pde_idx  = (va >> 21) & 0x1FF;
+    uint64_t pte_idx  = (va >> 12) & 0x1FF;
+    uint64_t offset   = va & 0xFFF;
 
+    uint64_t pml5_addr = (cr3 & ~0xFFFULL) + (pml5_idx * 8);
+    uint64_t pml5e = mem_->read64(pml5_addr);
+    if (!(pml5e & 0x1)) {
+        fault_info.present = false;
+        return false;
+    }
 
-    return walk_x86_4level(va, access, mode, cr3, out_pa, fault_info);
+    uint64_t pml4_addr = (pml5e & ~0xFFFULL) + (pml4_idx * 8);
+    uint64_t pml4e = mem_->read64(pml4_addr);
+    if (!(pml4e & 0x1)) {
+        fault_info.present = false;
+        return false;
+    }
+
+    uint64_t pdpt_addr = (pml4e & ~0xFFFULL) + (pdpt_idx * 8);
+    uint64_t pdpte = mem_->read64(pdpt_addr);
+    if (!(pdpte & 0x1)) {
+        fault_info.present = false;
+        return false;
+    }
+
+    uint64_t pde_addr = (pdpte & ~0xFFFULL) + (pde_idx * 8);
+    uint64_t pde = mem_->read64(pde_addr);
+    if (!(pde & 0x1)) {
+        fault_info.present = false;
+        return false;
+    }
+
+    uint64_t pte_addr = (pde & ~0xFFFULL) + (pte_idx * 8);
+    uint64_t pte = mem_->read64(pte_addr);
+    if (!(pte & 0x1)) {
+        fault_info.present = false;
+        return false;
+    }
+
+    bool user_access = (pml5e & 0x4) && (pml4e & 0x4) && (pdpte & 0x4) && (pde & 0x4) && (pte & 0x4);
+    bool write_access = (pml5e & 0x2) && (pml4e & 0x2) && (pdpte & 0x2) && (pde & 0x2) && (pte & 0x2);
+    bool exec_disable = (pml5e & (1ULL<<63)) || (pml4e & (1ULL<<63)) || (pdpte & (1ULL<<63)) || (pde & (1ULL<<63)) || (pte & (1ULL<<63));
+
+    if (mode == PrivilegeMode::USER && !user_access) return false;
+    if (access == AccessType::WRITE && !write_access) return false;
+    if (access == AccessType::FETCH && exec_disable) return false;
+
+    out_pa = (pte & 0x000FFFFFFFFFF000ULL) | offset;
+    return true;
 }
 
 bool MMU::check_page_fault(uint64_t pa, AccessType access, PrivilegeMode mode) {
-
-
-    (void)pa; (void)access; (void)mode;
+    // For x86_4level, the permissions are verified during the walk inside walk_x86_4level
+    // This is a simplified fallback for SV39 which already sets user_access etc.
     return true;
 }
 

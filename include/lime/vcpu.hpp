@@ -86,6 +86,8 @@ private:
     std::shared_ptr<JITEngine> jit_;
 
     std::array<uint64_t, 32> regs_{};
+    std::array<double, 32> fregs_{};
+    uint64_t fcsr_{0};
     uint64_t pc_{0};
     std::unordered_map<uint32_t, uint64_t> csrs_;
     PrivilegeMode mode_{PrivilegeMode::MACHINE};
