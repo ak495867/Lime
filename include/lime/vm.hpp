@@ -30,6 +30,10 @@ struct VMConfig {
     std::string sparse_disk_path;
     std::string delta_disk_path;
     std::string firmware_path;
+    std::string ovmf_vars_path;
+    std::string kernel_path;
+    std::string initrd_path;
+    std::string cmdline;
     AllocationPolicy policy{AllocationPolicy::BALANCED};
     bool enable_net{true};
     bool enable_graphics{true};

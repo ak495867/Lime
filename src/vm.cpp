@@ -28,7 +28,11 @@ bool VirtualMachine::init() {
         ACPITableBuilder::generate_tables(memory_, 0x000F0000, config_.cpu_count);
     }
 
-    if (!config_.firmware_path.empty()) {
+    if (!config_.kernel_path.empty()) {
+        FirmwareLoader::load_linux_kernel(memory_, config_.kernel_path, config_.initrd_path, config_.cmdline, 0x80200000, &entry_point_);
+    } else if (!config_.firmware_path.empty() && !config_.ovmf_vars_path.empty()) {
+        FirmwareLoader::load_ovmf_split(memory_, config_.firmware_path, config_.ovmf_vars_path, 0xFFC00000, 0xFFB00000);
+    } else if (!config_.firmware_path.empty()) {
         FirmwareLoader::load_firmware(memory_, config_.firmware_path, FirmwareType::UEFI_OVMF, 0xFFF00000);
     }
 

@@ -113,6 +113,21 @@ int CLI::handle_run(const std::vector<std::string>& args) {
         } else if (args[i] == "--overlay" && i + 1 < args.size()) {
             config.delta_disk_path = args[i + 1];
             i++;
+        } else if (args[i] == "--kernel" && i + 1 < args.size()) {
+            config.kernel_path = args[i + 1];
+            i++;
+        } else if (args[i] == "--initrd" && i + 1 < args.size()) {
+            config.initrd_path = args[i + 1];
+            i++;
+        } else if (args[i] == "--cmdline" && i + 1 < args.size()) {
+            config.cmdline = args[i + 1];
+            i++;
+        } else if (args[i] == "--firmware" && i + 1 < args.size()) {
+            config.firmware_path = args[i + 1];
+            i++;
+        } else if (args[i] == "--ovmf-vars" && i + 1 < args.size()) {
+            config.ovmf_vars_path = args[i + 1];
+            i++;
         } else if (args[i] == "--hardware-vt") {
             config.use_hardware_hypervisor = true;
         } else if (args[i] == "--net") {
