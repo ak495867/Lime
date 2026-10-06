@@ -8,7 +8,7 @@
 namespace lime {
 
 SparseDisk::~SparseDisk() {
-    // Clear LRU cache
+
     {
         std::lock_guard<std::mutex> lock(lru_mutex_);
         lru_cache_.clear();

@@ -63,13 +63,11 @@ public:
     void attach_clint(std::shared_ptr<ClintDevice> clint);
     void attach_plic(std::shared_ptr<PlicDevice> plic);
 
-    // RISC-V 'A' (Atomic) extension: LR/SC instructions
     void execute_lr(uint32_t rd, uint32_t rs1, uint32_t funct3);
     void execute_sc(uint32_t rd, uint32_t rs1, uint32_t rs2, uint32_t funct3);
     bool lr_valid() const { return lr_valid_; }
     uint64_t lr_addr() const { return lr_addr_; }
 
-    // RISC-V 'C' (Compressed) extension: 16-bit instructions
     bool execute_compressed(uint16_t inst);
 
 private:
@@ -95,7 +93,6 @@ private:
     uint64_t total_cycles_{0};
     mutable std::mutex mutex_;
 
-    // Atomic extension (LR/SC) state
     bool lr_valid_{false};
     uint64_t lr_addr_{0};
 };

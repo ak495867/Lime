@@ -85,14 +85,14 @@ bool VirtualMachine::init() {
         x86_vcpu_ = std::make_shared<X86CPUDecoder>(memory_, bus_);
         x86_vcpu_->reset(0x7C00);
     } else {
-        // Create one VCPU per CPU core for true SMP (multi-core) execution
+
         for (uint32_t i = 0; i < config_.cpu_count; ++i) {
             auto vcpu = std::make_shared<VCPU>(i, memory_, bus_);
             vcpu->attach_clint(clint_);
             vcpu->attach_plic(plic_);
             vcpu->reset(entry_point_);
             vcpus_.push_back(vcpu);
-            if (i == 0) vcpu_ = vcpu;  // primary VCPU for legacy access
+            if (i == 0) vcpu_ = vcpu;  
         }
     }
 
@@ -153,38 +153,44 @@ void VirtualMachine::run() {
         scheduler_->start();
     }
 
-    const size_t batch_cycles = 1000;
-
-    while (running_) {
-        if (config_.target_arch == TargetArch::X86_64) {
+    if (config_.target_arch == TargetArch::X86_64) {
+        while (running_) {
             if (!x86_vcpu_ || !x86_vcpu_->step()) {
                 break;
             }
-        } else {
-            // Execute all VCPUs for SMP (multi-core) support
-            for (auto& vcpu : vcpus_) {
-                if (vcpu->state() == VCPUState::HALTED) {
-                    break;
-                }
-
-                bool was_idle = (vcpu->state() == VCPUState::IDLE_WAIT);
-                if (!was_idle) {
-                    size_t executed = vcpu->run_cycles(batch_cycles);
-                    if (executed == 0) {
-                        was_idle = true;
+        }
+    } else {
+        const size_t batch_cycles = 1000;
+        std::vector<std::thread> threads;
+        
+        for (auto& vcpu : vcpus_) {
+            threads.emplace_back([this, vcpu, batch_cycles]() {
+                while (running_) {
+                    if (vcpu->state() == VCPUState::HALTED) {
+                        break;
+                    }
+                    bool was_idle = (vcpu->state() == VCPUState::IDLE_WAIT);
+                    if (!was_idle) {
+                        size_t executed = vcpu->run_cycles(batch_cycles);
+                        if (executed == 0) {
+                            was_idle = true;
+                        }
+                    }
+                    if (scheduler_) {
+                        scheduler_->notify_cycle(was_idle);
+                    }
+                    bus_->tick_all();
+                    uint32_t sleep_ms = scheduler_->calculate_sleep_duration_ms();
+                    if (sleep_ms > 0) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
                     }
                 }
-
-                if (scheduler_) {
-                    scheduler_->notify_cycle(was_idle);
-                }
-
-                bus_->tick_all();
-
-                uint32_t sleep_ms = scheduler_->calculate_sleep_duration_ms();
-                if (sleep_ms > 0) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
-                }
+            });
+        }
+        
+        for (auto& t : threads) {
+            if (t.joinable()) {
+                t.join();
             }
         }
     }

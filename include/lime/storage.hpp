@@ -26,7 +26,7 @@ class SparseDisk {
 public:
     static const uint32_t SECTOR_SIZE = 512;
 
-    SparseDisk();
+    SparseDisk() = default;
     ~SparseDisk();
 
     static bool create(const std::string& path, uint64_t capacity_bytes, uint32_t block_size = 65536);
@@ -53,8 +53,7 @@ private:
     mutable std::mutex mutex_;
     bool is_open_{false};
 
-    // LRU cache for frequently accessed blocks
-    static constexpr size_t LRU_CACHE_SIZE = 1024; // Cache up to 1024 blocks (64MB with 64KB blocks)
+    static constexpr size_t LRU_CACHE_SIZE = 1024; 
     struct LRUCacheEntry {
         uint32_t block_index;
         uint32_t file_block_idx;
@@ -63,7 +62,7 @@ private:
         std::chrono::steady_clock::time_point last_access;
     };
     std::unordered_map<uint32_t, LRUCacheEntry> lru_cache_;
-    std::list<uint32_t> lru_list_; // For LRU eviction (most recent at front)
+    std::list<uint32_t> lru_list_; 
     mutable std::mutex lru_mutex_;
 };
 

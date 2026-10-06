@@ -180,11 +180,10 @@ void VirtIONetDevice::start_worker() {
             pending_frames_.pop();
             lock.unlock();
 
-            // Simulate network frame transmission (in a real implementation, this would send over a socket)
             bool ok = true;
             if (ok) {
                 packets_sent_++;
-                packets_recv_++;  // Echo for simplicity
+                packets_recv_++;  
             }
             if (frame.callback) frame.callback(ok);
         }

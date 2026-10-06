@@ -7,10 +7,10 @@ VirtIOUSBDevice::VirtIOUSBDevice(uint64_t base_addr)
 
 uint32_t VirtIOUSBDevice::read(uint64_t offset, size_t) {
     switch (offset) {
-    case 0x00: return 0x74726976;  // 'VIRT' magic
-    case 0x04: return 2;           // 2 bytes
-    case 0x08: return 1;           // 1 device descriptor
-    case 0x70: return status_;      // Status register
+    case 0x00: return 0x74726976;  
+    case 0x04: return 2;           
+    case 0x08: return 1;           
+    case 0x70: return status_;      
     default: return 0;
     }
 }
@@ -43,4 +43,4 @@ bool VirtIOUSBDevice::is_port_attached(uint8_t port) const {
     return (port < 4) && (port_mask_ & (1 << port)) && !attached_devices_[port].empty();
 }
 
-};  // namespace lime
+};  

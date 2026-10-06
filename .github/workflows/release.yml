@@ -43,7 +43,7 @@ jobs:
               src/interrupts.cpp src/mmu.cpp src/hypervisor.cpp src/net_bridge.cpp `
               src/jit.cpp src/acpi.cpp src/pci.cpp src/firmware.cpp src/nvme.cpp `
               src/x86_cpu.cpp src/vcpu.cpp src/scheduler.cpp src/vm.cpp src/cli.cpp src/main.cpp `
-              -lws2_32 -o ${{ matrix.artifact_name }}
+              -lws2_32 -lWinHvPlatform -o ${{ matrix.artifact_name }}
 
       - name: Upload Release Asset
         uses: actions/upload-release-asset@v1

@@ -43,8 +43,7 @@ public:
     bool is_user_access_allowed(uint64_t pa);
     bool is_execute_allowed(uint64_t pa);
 
-    // TLB Cache
-    void invalidate_tlb(uint64_t va = 0); // va=0 means full flush
+    void invalidate_tlb(uint64_t va = 0); 
 
 private:
     bool walk_sv39(uint64_t va, AccessType access, PrivilegeMode mode, uint64_t root_pt_gpa, uint64_t& out_pa, PageFaultInfo& fault_info);
@@ -58,7 +57,6 @@ private:
     std::shared_ptr<MemoryManager> mem_;
     mutable std::mutex translate_mutex_;
 
-    // TLB Cache (per-CPU, simple LRU)
     struct TLBEntry {
         uint64_t va;
         uint64_t pa;

@@ -66,7 +66,6 @@ public:
     uint32_t read(uint64_t offset, size_t size) override;
     void write(uint64_t offset, uint32_t value, size_t size) override;
 
-    // Asynchronous I/O support
     void start_worker();
     void stop_worker();
     void submit_async_read(uint64_t lba, uint32_t sector_count, void* buffer, std::function<void(bool)> callback = nullptr);
@@ -107,7 +106,6 @@ public:
     uint32_t read(uint64_t offset, size_t size) override;
     void write(uint64_t offset, uint32_t value, size_t size) override;
 
-    // Asynchronous I/O support
     void start_worker();
     void stop_worker();
     void send_frame_async(const std::vector<uint8_t>& frame, std::function<void(bool)> callback = nullptr);
