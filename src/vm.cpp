@@ -57,7 +57,7 @@ bool VirtualMachine::init() {
             SparseDisk::create(config_.sparse_disk_path, 10ULL * 1024 * 1024 * 1024);
             disk_->open(config_.sparse_disk_path);
         }
-        block_device_ = std::make_shared<VirtIOBlockDevice>(disk_, 0x10001000);
+        block_device_ = std::make_shared<VirtIOBlockDevice>(disk_, memory_, 0x10001000);
         bus_->register_device(block_device_);
 
         if (config_.enable_nvme) {
@@ -70,7 +70,7 @@ bool VirtualMachine::init() {
     }
 
     if (config_.enable_net) {
-        net_device_ = std::make_shared<VirtIONetDevice>(0x10002000);
+        net_device_ = std::make_shared<VirtIONetDevice>(memory_, 0x10002000);
         bus_->register_device(net_device_);
 
         net_bridge_ = std::make_shared<HostNetBridge>(net_device_);
@@ -142,7 +142,7 @@ bool VirtualMachine::load_lime_image(const std::string& image_path) {
         }
         disk_->open(image_path);
         if (!block_device_) {
-            block_device_ = std::make_shared<VirtIOBlockDevice>(disk_, 0x10001000);
+            block_device_ = std::make_shared<VirtIOBlockDevice>(disk_, memory_, 0x10001000);
             bus_->register_device(block_device_);
         }
     }

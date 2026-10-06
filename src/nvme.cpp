@@ -55,6 +55,10 @@ void NVMeController::write(uint64_t offset, uint32_t value, size_t size) {
         admin_sq_head_ = value & 0xFFFF;
         process_admin_sq();
         break;
+    case 0x1008:
+        // IO SQ1 Doorbell
+        process_io_sq();
+        break;
     default:
         break;
     }
@@ -84,7 +88,52 @@ void NVMeController::process_admin_sq() {
     admin_cq_tail_ = (admin_cq_tail_ + 1) % sq_size;
 }
 
-void NVMeController::process_io_sq() {}
+void NVMeController::process_io_sq() {
+    // For a full NVMe implementation, IO queues are dynamically created via Admin SQ commands.
+    // Assuming SQ1/CQ1 are mapped in guest memory at known locations or tracked in an internal map.
+    // This demonstrates processing a standard 64-byte NVMe NVM Command Set SQE.
+    
+    if (!mem_ || !disk_) return;
+    
+    // Simulate fetching the next IO SQE (assuming a single static IO queue for the simplified runtime)
+    uint64_t io_sq_base = regs_.asq + 0x10000; 
+    uint64_t io_cq_base = regs_.acq + 0x10000;
+    
+    std::vector<uint8_t> sqe(64);
+    // In a real driver, io_sq_head would be tracked dynamically
+    mem_->read_bytes(io_sq_base, sqe.data(), 64);
+    
+    uint8_t opcode = sqe[0];
+    uint16_t cid = sqe[2] | (sqe[3] << 8);
+    
+    uint64_t prp1 = 0;
+    std::memcpy(&prp1, &sqe[24], 8);
+    
+    uint64_t slba = 0;
+    std::memcpy(&slba, &sqe[40], 8);
+    
+    uint16_t length = 0;
+    std::memcpy(&length, &sqe[48], 2);
+    
+    uint32_t sector_count = length + 1;
+    std::vector<uint8_t> buffer(sector_count * 512, 0);
+    
+    if (opcode == 0x02) { // Read
+        disk_->read_sectors(slba, sector_count, buffer.data());
+        mem_->write_bytes(prp1, buffer.data(), buffer.size());
+    } else if (opcode == 0x01) { // Write
+        mem_->read_bytes(prp1, buffer.data(), buffer.size());
+        disk_->write_sectors(slba, sector_count, buffer.data());
+    }
+    
+    std::vector<uint8_t> cqe(16, 0);
+    cqe[12] = cid & 0xFF;
+    cqe[13] = (cid >> 8) & 0xFF;
+    cqe[14] = 0; // Success
+    cqe[15] = 1; // Phase tag
+    
+    mem_->write_bytes(io_cq_base, cqe.data(), 16);
+}
 
 uint64_t NVMeController::capacity_bytes() const {
     return disk_ ? disk_->capacity_bytes() : 0;

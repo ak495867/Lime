@@ -73,8 +73,8 @@ std::string UartConsoleDevice::get_output_buffer() {
     return res;
 }
 
-VirtIOBlockDevice::VirtIOBlockDevice(std::shared_ptr<SparseDisk> disk, uint64_t base_addr)
-    : disk_(disk), base_addr_(base_addr) {}
+VirtIOBlockDevice::VirtIOBlockDevice(std::shared_ptr<SparseDisk> disk, std::shared_ptr<MemoryManager> mem, uint64_t base_addr)
+    : disk_(disk), mem_(mem), base_addr_(base_addr) {}
 
 VirtIOBlockDevice::~VirtIOBlockDevice() {
     stop_worker();
@@ -141,6 +141,18 @@ uint32_t VirtIOBlockDevice::read(uint64_t offset, size_t) {
 
 void VirtIOBlockDevice::write(uint64_t offset, uint32_t value, size_t) {
     switch (offset) {
+    case 0x40:
+        vq_pfn_ = value;
+        break;
+    case 0x50:
+        // Handle virtqueue doorbell
+        if (mem_ && disk_) {
+            uint64_t vq_addr = static_cast<uint64_t>(vq_pfn_) * 4096;
+            // A full implementation would parse vring_avail, follow vring_desc, and submit async reads/writes
+            // and then update vring_used. We trigger the async worker here in the full flow.
+            cv_.notify_one();
+        }
+        break;
     case 0x70:
         status_ = value;
         break;
@@ -158,7 +170,8 @@ void VirtIOBlockDevice::write(uint64_t offset, uint32_t value, size_t) {
     }
 }
 
-VirtIONetDevice::VirtIONetDevice(uint64_t base_addr) : base_addr_(base_addr) {}
+VirtIONetDevice::VirtIONetDevice(std::shared_ptr<MemoryManager> mem, uint64_t base_addr) 
+    : mem_(mem), base_addr_(base_addr) {}
 
 VirtIONetDevice::~VirtIONetDevice() {
     stop_worker();
@@ -219,6 +232,16 @@ uint32_t VirtIONetDevice::read(uint64_t offset, size_t) {
 
 void VirtIONetDevice::write(uint64_t offset, uint32_t value, size_t) {
     switch (offset) {
+    case 0x40:
+        vq_pfn_ = value;
+        break;
+    case 0x50:
+        if (mem_) {
+            uint64_t vq_addr = static_cast<uint64_t>(vq_pfn_) * 4096;
+            // Full implementation: read vring_avail, pop frames, send to bridge, push to vring_used
+            cv_.notify_one();
+        }
+        break;
     case 0x70:
         status_ = value;
         break;

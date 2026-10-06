@@ -16,6 +16,32 @@
 
 namespace lime {
 
+#pragma pack(push, 1)
+struct vring_desc {
+    uint64_t addr;
+    uint32_t len;
+    uint16_t flags;
+    uint16_t next;
+};
+
+struct vring_avail {
+    uint16_t flags;
+    uint16_t idx;
+    uint16_t ring[];
+};
+
+struct vring_used_elem {
+    uint32_t id;
+    uint32_t len;
+};
+
+struct vring_used {
+    uint16_t flags;
+    uint16_t idx;
+    vring_used_elem ring[];
+};
+#pragma pack(pop)
+
 class Device {
 public:
     virtual ~Device() = default;
@@ -56,7 +82,7 @@ private:
 
 class VirtIOBlockDevice : public Device {
 public:
-    VirtIOBlockDevice(std::shared_ptr<SparseDisk> disk, uint64_t base_addr = 0x10001000);
+    VirtIOBlockDevice(std::shared_ptr<SparseDisk> disk, std::shared_ptr<MemoryManager> mem, uint64_t base_addr = 0x10001000);
     ~VirtIOBlockDevice() override;
 
     std::string name() const override { return "VirtIO-Block"; }
@@ -73,8 +99,10 @@ public:
 
 private:
     std::shared_ptr<SparseDisk> disk_;
+    std::shared_ptr<MemoryManager> mem_;
     uint64_t base_addr_;
     uint32_t status_{0};
+    uint32_t vq_pfn_{0};
     uint64_t current_lba_{0};
     uint32_t sector_count_{0};
 
@@ -96,7 +124,7 @@ private:
 
 class VirtIONetDevice : public Device {
 public:
-    explicit VirtIONetDevice(uint64_t base_addr = 0x10002000);
+    VirtIONetDevice(std::shared_ptr<MemoryManager> mem, uint64_t base_addr = 0x10002000);
     ~VirtIONetDevice() override;
 
     std::string name() const override { return "VirtIO-Net"; }
@@ -114,8 +142,10 @@ public:
     uint64_t packets_recv() const { return packets_recv_; }
 
 private:
+    std::shared_ptr<MemoryManager> mem_;
     uint64_t base_addr_;
     uint32_t status_{0};
+    uint32_t vq_pfn_{0};
     uint64_t packets_sent_{0};
     uint64_t packets_recv_{0};
 
