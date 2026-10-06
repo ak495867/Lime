@@ -91,6 +91,7 @@ private:
     std::shared_ptr<VirtIONetDevice> net_device_;
     std::shared_ptr<VirtIOBalloonDevice> balloon_device_;
     std::shared_ptr<VirtIOGraphicsDevice> gpu_device_;
+    std::shared_ptr<VirtIOInputDevice> input_device_;
 
     std::atomic<bool> running_{false};
     uint64_t entry_point_{0x80000000};

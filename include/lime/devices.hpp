@@ -180,10 +180,12 @@ private:
     uint32_t actual_pages_{0};
 };
 
+class VirtIOInputDevice;
+
 class VirtIOGraphicsDevice : public Device {
 public:
     explicit VirtIOGraphicsDevice(uint64_t base_addr = 0x10004000);
-    ~VirtIOGraphicsDevice() override = default;
+    ~VirtIOGraphicsDevice() override;
 
     std::string name() const override { return "VirtIO-GPU"; }
     uint64_t base_address() const override { return base_addr_; }
@@ -192,15 +194,49 @@ public:
     uint32_t read(uint64_t offset, size_t size) override;
     void write(uint64_t offset, uint32_t value, size_t size) override;
 
+    void start_display(std::shared_ptr<VirtIOInputDevice> input_dev = nullptr);
+    void stop_display();
+
     uint32_t width() const { return width_; }
     uint32_t height() const { return height_; }
     const std::vector<uint32_t>& framebuffer() const { return framebuffer_; }
 
 private:
     uint64_t base_addr_;
-    uint32_t width_{320};
-    uint32_t height_{240};
+    uint32_t width_{800};
+    uint32_t height_{600};
     std::vector<uint32_t> framebuffer_;
+    
+    std::thread display_thread_;
+    std::atomic<bool> display_running_{false};
+    void* hwnd_{nullptr};
+};
+
+class VirtIOInputDevice : public Device {
+public:
+    explicit VirtIOInputDevice(uint64_t base_addr = 0x10005000);
+    ~VirtIOInputDevice() override = default;
+
+    std::string name() const override { return "VirtIO-Input"; }
+    uint64_t base_address() const override { return base_addr_; }
+    uint64_t size() const override { return 0x1000; }
+
+    uint32_t read(uint64_t offset, size_t size) override;
+    void write(uint64_t offset, uint32_t value, size_t size) override;
+
+    void push_event(uint16_t type, uint16_t code, uint32_t value);
+
+private:
+    uint64_t base_addr_;
+    uint32_t status_{0};
+    
+    struct InputEvent {
+        uint16_t type;
+        uint16_t code;
+        uint32_t value;
+    };
+    std::queue<InputEvent> events_;
+    mutable std::mutex mutex_;
 };
 
 class DeviceBus {

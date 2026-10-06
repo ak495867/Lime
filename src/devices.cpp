@@ -382,3 +382,112 @@ const std::vector<std::shared_ptr<Device>>& DeviceBus::devices() const {
 }
 
 }
+
+#if defined(_WIN32)
+#include <windows.h>
+#endif
+
+namespace lime {
+
+VirtIOGraphicsDevice::~VirtIOGraphicsDevice() {
+    stop_display();
+}
+
+void VirtIOGraphicsDevice::start_display(std::shared_ptr<VirtIOInputDevice> input_dev) {
+#if defined(_WIN32)
+    if (display_running_) return;
+    display_running_ = true;
+    display_thread_ = std::thread([this, input_dev]() {
+        WNDCLASS wc = {};
+        wc.lpfnWndProc = DefWindowProc;
+        wc.hInstance = GetModuleHandle(nullptr);
+        wc.lpszClassName = "LIME_UI";
+        RegisterClass(&wc);
+
+        HWND hwnd = CreateWindowEx(
+            0, "LIME_UI", "LIME Virtual Machine",
+            WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
+            width_, height_, nullptr, nullptr, wc.hInstance, nullptr
+        );
+
+        if (!hwnd) return;
+        hwnd_ = hwnd;
+        ShowWindow(hwnd, SW_SHOW);
+        UpdateWindow(hwnd);
+
+        HDC hdc = GetDC(hwnd);
+        
+        MSG msg;
+        while (display_running_) {
+            while (PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE)) {
+                if (msg.message == WM_QUIT || msg.message == WM_CLOSE) {
+                    display_running_ = false;
+                    break;
+                }
+                
+                if (input_dev) {
+                    if (msg.message == WM_KEYDOWN || msg.message == WM_KEYUP) {
+                        uint16_t code = static_cast<uint16_t>(msg.wParam);
+                        uint32_t val = (msg.message == WM_KEYDOWN) ? 1 : 0;
+                        input_dev->push_event(1, code, val); // 1 = EV_KEY
+                    } else if (msg.message == WM_MOUSEMOVE) {
+                        int x = (int)(short)LOWORD(msg.lParam);
+                        int y = (int)(short)HIWORD(msg.lParam);
+                        input_dev->push_event(3, 0, x); // 3 = EV_ABS, 0 = ABS_X
+                        input_dev->push_event(3, 1, y); // 3 = EV_ABS, 1 = ABS_Y
+                    }
+                }
+                
+                TranslateMessage(&msg);
+                DispatchMessage(&msg);
+            }
+            
+            BITMAPINFO bmi = {};
+            bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+            bmi.bmiHeader.biWidth = width_;
+            bmi.bmiHeader.biHeight = -static_cast<int>(height_); 
+            bmi.bmiHeader.biPlanes = 1;
+            bmi.bmiHeader.biBitCount = 32;
+            bmi.bmiHeader.biCompression = BI_RGB;
+            
+            StretchDIBits(hdc, 0, 0, width_, height_, 0, 0, width_, height_,
+                          framebuffer_.data(), &bmi, DIB_RGB_COLORS, SRCCOPY);
+            
+            std::this_thread::sleep_for(std::chrono::milliseconds(16)); // ~60 FPS
+        }
+        ReleaseDC(hwnd, hdc);
+        DestroyWindow(hwnd);
+    });
+#endif
+}
+
+void VirtIOGraphicsDevice::stop_display() {
+    display_running_ = false;
+    if (display_thread_.joinable()) display_thread_.join();
+}
+
+VirtIOInputDevice::VirtIOInputDevice(uint64_t base_addr) : base_addr_(base_addr) {}
+
+uint32_t VirtIOInputDevice::read(uint64_t offset, size_t) {
+    switch (offset) {
+    case 0x00: return 0x74726976;
+    case 0x04: return 2;
+    case 0x08: return 18; // virtio-input
+    case 0x70: return status_;
+    default: return 0;
+    }
+}
+
+void VirtIOInputDevice::write(uint64_t offset, uint32_t value, size_t) {
+    switch (offset) {
+    case 0x70: status_ = value; break;
+    default: break;
+    }
+}
+
+void VirtIOInputDevice::push_event(uint16_t type, uint16_t code, uint32_t value) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    events_.push({type, code, value});
+}
+
+}

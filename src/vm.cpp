@@ -80,9 +80,11 @@ bool VirtualMachine::init() {
     balloon_device_ = std::make_shared<VirtIOBalloonDevice>(memory_, 0x10003000);
     bus_->register_device(balloon_device_);
 
-    if (config_.enable_graphics) {
+    if (config_.enable_graphics && !config_.headless) {
         gpu_device_ = std::make_shared<VirtIOGraphicsDevice>(0x10004000);
         bus_->register_device(gpu_device_);
+        input_device_ = std::make_shared<VirtIOInputDevice>(0x10005000);
+        bus_->register_device(input_device_);
     }
 
     if (config_.target_arch == TargetArch::X86_64) {
@@ -156,6 +158,10 @@ void VirtualMachine::run() {
     if (scheduler_) {
         scheduler_->start();
     }
+    
+    if (gpu_device_) {
+        gpu_device_->start_display(input_device_);
+    }
 
     if (config_.target_arch == TargetArch::X86_64) {
         while (running_) {
@@ -202,6 +208,11 @@ void VirtualMachine::run() {
     if (scheduler_) {
         scheduler_->stop();
     }
+    
+    if (gpu_device_) {
+        gpu_device_->stop_display();
+    }
+    
     running_ = false;
 }
 
