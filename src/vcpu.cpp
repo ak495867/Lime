@@ -184,12 +184,8 @@ size_t VCPU::run_cycles(size_t max_cycles) {
 
         const BasicBlock* bb = jit_->lookup_or_compile(curr_pc, block_insts);
         if (bb) {
-            for (const auto& uop : bb->ops) {
-                pc_ += 4;
-                execute_instruction(uop.raw_inst);
-                executed++;
-                if (state_.load() != VCPUState::RUNNING) break;
-            }
+            if (!bb->executor) compile_block(const_cast<BasicBlock&>(*bb));
+            if (!bb->executor(*this, executed)) break;
         } else {
             if (!step()) break;
             executed++;
@@ -623,4 +619,84 @@ bool VCPU::execute_compressed(uint16_t inst) {
     return true;
 }
 
+bool VCPU::execute_block_fast(const BasicBlock* bb, size_t& executed) {
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wc99-designator"
+#pragma GCC diagnostic ignored "-Winitializer-overrides"
+    static const void* dispatch_table[128] = {
+        [0 ... 127] = &&OP_FALLBACK,
+        [0x03] = &&OP_LOAD,
+        [0x23] = &&OP_STORE,
+        [0x13] = &&OP_ALUI,
+        [0x33] = &&OP_ALUR,
+        [0x37] = &&OP_LUI,
+        [0x17] = &&OP_AUIPC
+    };
+#pragma GCC diagnostic pop
+
+    const MicroOp* op = bb->ops.data();
+    const MicroOp* end = op + bb->ops.size();
+
+    if (op == end) return true;
+    goto *dispatch_table[op->opcode];
+
+OP_LUI:
+    pc_ += 4;
+    if (op->rd != 0) regs_[op->rd] = static_cast<int64_t>(op->imm & 0xFFFFF000);
+    op++; executed++;
+    if (op == end) return true;
+    goto *dispatch_table[op->opcode];
+
+OP_AUIPC:
+    if (op->rd != 0) regs_[op->rd] = pc_ + static_cast<int64_t>(op->imm & 0xFFFFF000);
+    pc_ += 4;
+    op++; executed++;
+    if (op == end) return true;
+    goto *dispatch_table[op->opcode];
+
+OP_ALUI: {
+    pc_ += 4;
+    uint64_t val1 = get_reg(op->rs1);
+    uint32_t funct3 = (op->raw_inst >> 12) & 0x7;
+    uint64_t res = 0;
+    switch(funct3) {
+        case 0: res = val1 + op->imm; break;
+        case 4: res = val1 ^ op->imm; break;
+        case 6: res = val1 | op->imm; break;
+        case 7: res = val1 & op->imm; break;
+        default: execute_instruction(op->raw_inst); pc_-=4; res = get_reg(op->rd); break;
+    }
+    if (op->rd != 0) regs_[op->rd] = res;
+    op++; executed++;
+    if (op == end) return true;
+    goto *dispatch_table[op->opcode];
 }
+
+OP_ALUR:
+    pc_ += 4;
+    execute_instruction(op->raw_inst);
+    pc_-=4; 
+    op++; executed++;
+    if (op == end || state_.load() != VCPUState::RUNNING) return state_.load() == VCPUState::RUNNING;
+    goto *dispatch_table[op->opcode];
+
+OP_LOAD:
+OP_STORE:
+OP_FALLBACK:
+    pc_ += 4;
+    execute_instruction(op->raw_inst);
+    pc_-=4; 
+    op++; executed++;
+    if (op == end || state_.load() != VCPUState::RUNNING) return state_.load() == VCPUState::RUNNING;
+    goto *dispatch_table[op->opcode];
+}
+
+void VCPU::compile_block(BasicBlock& bb) {
+    BasicBlock* bb_ptr = &bb;
+    bb.executor = [this, bb_ptr](VCPU& cpu, size_t& executed) -> bool {
+        return cpu.execute_block_fast(bb_ptr, executed);
+    };
+}
+
+}
+

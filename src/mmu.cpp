@@ -9,7 +9,6 @@ uint64_t MMU::translate(uint64_t va, AccessType access, PrivilegeMode mode, uint
     uint64_t satp_mode = satp >> 60;
 
     if (mode == PrivilegeMode::MACHINE) {
-
         uint64_t cr3 = satp & 0xFFFFFFFFFFFFF000ULL;
         uint64_t pa = 0;
         PageFaultInfo fault_info;
@@ -21,16 +20,39 @@ uint64_t MMU::translate(uint64_t va, AccessType access, PrivilegeMode mode, uint
     }
 
     if (satp_mode == 0) {
-
         return va;
     }
 
     if (satp_mode == 8) { 
+        uint64_t vpn = va >> 12;
+        uint32_t asid = (satp >> 44) & 0xFFFF;
+        size_t idx = vpn % TLB_SIZE;
+        TLBEntry& entry = tlb_[idx];
+        
+        if (entry.valid && entry.vpn == vpn && entry.asid == asid) {
+            bool user = (mode == PrivilegeMode::USER);
+            if (!user || entry.user) {
+                if ((access == AccessType::READ && entry.read) ||
+                    (access == AccessType::WRITE && entry.write) ||
+                    (access == AccessType::FETCH && entry.exec)) {
+                    return entry.pa | (va & 0xFFF);
+                }
+            }
+        }
+        
         uint64_t root_pt = satp & ((1ULL << 44) - 1);
         uint64_t root_pt_gpa = root_pt << 12;
         uint64_t pa = 0;
         PageFaultInfo fault_info;
         if (walk_sv39(va, access, mode, root_pt_gpa, pa, fault_info)) {
+            entry.vpn = vpn;
+            entry.pa = pa & ~0xFFFULL;
+            entry.asid = asid;
+            entry.valid = true;
+            entry.user = fault_info.user_access;
+            entry.read = true;
+            entry.write = fault_info.writeable;
+            entry.exec = !fault_info.execute_disable;
             return pa;
         }
         page_fault = true;
@@ -198,9 +220,14 @@ uint64_t MMU::get_physical_address(const std::vector<uint64_t>& page_table_indic
 }
 
 void MMU::invalidate_tlb(uint64_t va) {
-
-    (void)va;
-    tlb_.fill({0, 0, AccessType::READ, PrivilegeMode::MACHINE});
+    if (va == 0) {
+        for (auto& entry : tlb_) {
+            entry.valid = false;
+        }
+    } else {
+        uint64_t vpn = va >> 12;
+        tlb_[vpn % TLB_SIZE].valid = false;
+    }
 }
 
 };

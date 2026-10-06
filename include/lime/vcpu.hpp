@@ -37,6 +37,8 @@ public:
     void reset(uint64_t entry_point);
     bool step();
     size_t run_cycles(size_t max_cycles);
+    void compile_block(BasicBlock& bb);
+    bool execute_block_fast(const BasicBlock* bb, size_t& executed);
 
     uint64_t get_reg(size_t idx) const;
     void set_reg(size_t idx, uint64_t val);

@@ -7,7 +7,11 @@
 #include <memory>
 #include <mutex>
 
+#include <functional>
+
 namespace lime {
+
+class VCPU;
 
 struct MicroOp {
     uint32_t raw_inst;
@@ -22,6 +26,7 @@ struct BasicBlock {
     uint64_t start_pc;
     std::vector<MicroOp> ops;
     size_t execute_count{0};
+    std::function<bool(VCPU&, size_t&)> executor;
 };
 
 class JITEngine {

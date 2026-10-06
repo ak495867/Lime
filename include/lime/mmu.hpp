@@ -58,14 +58,17 @@ private:
     mutable std::mutex translate_mutex_;
 
     struct TLBEntry {
-        uint64_t va;
+        uint64_t vpn;
         uint64_t pa;
-        AccessType access;
-        PrivilegeMode mode;
+        uint32_t asid;
+        bool valid;
+        bool user;
+        bool read;
+        bool write;
+        bool exec;
     };
-    static constexpr size_t TLB_SIZE = 64;
-    std::array<TLBEntry, TLB_SIZE> tlb_;
-    size_t tlb_index_{0};
+    static constexpr size_t TLB_SIZE = 1024;
+    std::array<TLBEntry, TLB_SIZE> tlb_{};
 };
 
 }
