@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/lime.png" alt="LIME Logo" width="300"/>
+</p>
+
 # LIME: Lightweight Userspace Virtual Machine Runtime
 
 LIME is a high-performance, lightweight C++ virtual machine and hardware abstraction layer designed to execute miniature operating systems, micro-kernels, security sandboxes, and embedded workloads inside a host OS while consuming dramatically fewer resources than traditional hypervisors like QEMU.
@@ -60,7 +64,7 @@ g++ -std=c++20 -Iinclude \
     src/interrupts.cpp src/mmu.cpp src/hypervisor.cpp src/net_bridge.cpp \
     src/jit.cpp src/acpi.cpp src/pci.cpp src/firmware.cpp src/nvme.cpp \
     src/x86_cpu.cpp src/vcpu.cpp src/scheduler.cpp src/vm.cpp src/cli.cpp src/main.cpp \
-    -o lime.exe -lws2_32
+    -o lime.exe -lws2_32 -lWinHvPlatform
 ```
 
 **Compiling Test Suite:**
@@ -70,7 +74,7 @@ g++ -std=c++20 -Iinclude \
     src/interrupts.cpp src/mmu.cpp src/hypervisor.cpp src/net_bridge.cpp \
     src/jit.cpp src/acpi.cpp src/pci.cpp src/firmware.cpp src/nvme.cpp \
     src/x86_cpu.cpp src/vcpu.cpp src/scheduler.cpp src/vm.cpp tests/test_lime.cpp \
-    -o test_lime.exe -lws2_32
+    -o test_lime.exe -lws2_32 -lWinHvPlatform
 
 .\test_lime.exe
 ```
