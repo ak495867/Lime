@@ -60,7 +60,7 @@ g++ -std=c++20 -Iinclude \
     src/interrupts.cpp src/mmu.cpp src/hypervisor.cpp src/net_bridge.cpp \
     src/jit.cpp src/acpi.cpp src/pci.cpp src/firmware.cpp src/nvme.cpp \
     src/x86_cpu.cpp src/vcpu.cpp src/scheduler.cpp src/vm.cpp src/cli.cpp src/main.cpp \
-    -o lime.exe
+    -o lime.exe -lws2_32
 ```
 
 **Compiling Test Suite:**
@@ -70,7 +70,7 @@ g++ -std=c++20 -Iinclude \
     src/interrupts.cpp src/mmu.cpp src/hypervisor.cpp src/net_bridge.cpp \
     src/jit.cpp src/acpi.cpp src/pci.cpp src/firmware.cpp src/nvme.cpp \
     src/x86_cpu.cpp src/vcpu.cpp src/scheduler.cpp src/vm.cpp tests/test_lime.cpp \
-    -o test_lime.exe
+    -o test_lime.exe -lws2_32
 
 .\test_lime.exe
 ```

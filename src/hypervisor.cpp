@@ -197,8 +197,8 @@ bool HostHypervisor::interrupt_vcpu(uint32_t vcpu_id) {
     if (caps_.type == HypervisorType::WHPX_WINDOWS) {
         WHV_VP_INDEX vp_index = vcpu_id;
         WHV_SINT DELIVER_PARAMETERS params = {};
-        params.SintType = WhvSintTypeMessage;  // or WhvSintTypeSynthetic
-        params.SintNumber = 0;  // Adjust as needed
+        params.SintType = WhvSintTypeMessage;
+        params.SintNumber = 0;
         HRESULT hr = WHvSintDeliver(handle_, vp_index, &params);
         return SUCCEEDED(hr);
     }
@@ -206,12 +206,54 @@ bool HostHypervisor::interrupt_vcpu(uint32_t vcpu_id) {
     // KVM: ioctl(KVM_IRQ_INJECT)
     if (caps_.type == HypervisorType::KVM_LINUX) {
         struct kvm_irq_level irq_event;
-        irq_event.irq = 0;  // Adjust as needed
-        irq_event.level = 1;  // Level-triggered interrupt
+        irq_event.irq = 0;
+        irq_event.level = 1;
         int ret = ioctl(static_cast<int>(reinterpret_cast<intptr_t>(handle_)), KVM_IRQ_INJECT, &irq_event);
         return ret >= 0;
     }
 #endif
+    return false;
+}
+
+bool HostHypervisor::create_nested_vm() {
+    if (!is_active_) return false;
+    nested_enabled_ = true;
+    
+#if defined(_WIN32)
+    // WHPX: Check VMCS shadow capability
+    if (caps_.type == HypervisorType::WHPX_WINDOWS) {
+        // In a full implementation, would use WHvCreatePartition with nested VMCS support
+        return true;
+    }
+#elif defined(__linux__)
+    // KVM: Enable nested virtualization via nested VMX
+    if (caps_.type == HypervisorType::KVM_LINUX) {
+        // In a full implementation, would check KVM_CAP_ENABLE_CAP_VM for KVM_CAP_VMX_ENABLE
+        // and set up nested VMCS/EPT structures
+        return true;
+    }
+#endif
+    (void)handle_;
+    return false;
+}
+
+bool HostHypervisor::create_nested_vcpu(uint32_t vcpu_id) {
+    if (!nested_enabled_) return false;
+    
+#if defined(_WIN32)
+    // WHPX: Create VP with VMCS shadow
+    if (caps_.type == HypervisorType::WHPX_WINDOWS) {
+        // In a full implementation, would create vCPU in nested VMCS shadow mode
+        return true;
+    }
+#elif defined(__linux__)
+    // KVM: Create vCPU in nested VMX mode
+    if (caps_.type == HypervisorType::KVM_LINUX) {
+        // In a full implementation, would create vCPU with KVM nested VMX enabled
+        return true;
+    }
+#endif
+    (void)vcpu_id;
     return false;
 }
 

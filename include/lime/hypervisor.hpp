@@ -38,6 +38,8 @@ public:
     bool create_vcpu(uint32_t vcpu_id);
     bool run_vcpu(uint32_t vcpu_id);
     bool interrupt_vcpu(uint32_t vcpu_id);
+    bool create_nested_vm();
+    bool create_nested_vcpu(uint32_t vcpu_id);
 
     HypervisorType type() const;
     bool is_active() const;
@@ -46,6 +48,7 @@ private:
     HypervisorCapabilities caps_;
     bool is_active_{false};
     void* handle_{nullptr};
+    bool nested_enabled_{false};
 };
 
 }
