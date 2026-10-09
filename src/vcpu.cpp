@@ -1,4 +1,5 @@
 #include "lime/vcpu.hpp"
+#include <cstring>
 #include "lime/jit_x86.hpp"
 #include <iostream>
 
@@ -727,19 +728,18 @@ bool VCPU::execute_block_fast(const BasicBlock* bb, size_t& executed) {
     }
     return true;
 #else
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wc99-designator"
-#pragma GCC diagnostic ignored "-Winitializer-overrides"
-    static const void* dispatch_table[128] = {
-        [0 ... 127] = &&OP_FALLBACK,
-        [0x03] = &&OP_LOAD,
-        [0x23] = &&OP_STORE,
-        [0x13] = &&OP_ALUI,
-        [0x33] = &&OP_ALUR,
-        [0x37] = &&OP_LUI,
-        [0x17] = &&OP_AUIPC
-    };
-#pragma GCC diagnostic pop
+    static const void* dispatch_table[128];
+    static bool table_initialized = false;
+    if (!table_initialized) {
+        for (int i = 0; i < 128; i++) dispatch_table[i] = &&OP_FALLBACK;
+        dispatch_table[0x03] = &&OP_LOAD;
+        dispatch_table[0x23] = &&OP_STORE;
+        dispatch_table[0x13] = &&OP_ALUI;
+        dispatch_table[0x33] = &&OP_ALUR;
+        dispatch_table[0x37] = &&OP_LUI;
+        dispatch_table[0x17] = &&OP_AUIPC;
+        table_initialized = true;
+    }
 
     const MicroOp* op = bb->ops.data();
     const MicroOp* end = op + bb->ops.size();
@@ -807,5 +807,6 @@ void VCPU::compile_block(BasicBlock& bb) {
 }
 
 }
+
 
 

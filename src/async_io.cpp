@@ -7,6 +7,7 @@
 #include <fstream>
 #include <mutex>
 #include <thread>
+#include <condition_variable>
 #include <vector>
 
 #if defined(_WIN32)

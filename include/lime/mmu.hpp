@@ -5,6 +5,7 @@
 #include <memory>
 #include <vector>
 #include "lime/memory.hpp"
+#include <array>
 
 namespace lime {
 
