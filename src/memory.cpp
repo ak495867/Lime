@@ -102,7 +102,7 @@ bool MemoryManager::read_bytes(uint64_t gpa, void* dst, size_t len) {
     while (remaining > 0) {
         uint64_t page_idx = curr_gpa / page_size_;
         uint64_t offset = curr_gpa % page_size_;
-        size_t chunk = std::min(remaining, page_size_ - offset);
+        size_t chunk = std::min<size_t>(remaining, page_size_ - offset);
 
         uint8_t* page = ensure_page(page_idx, false);
         if (!page) return false;
@@ -124,7 +124,7 @@ bool MemoryManager::write_bytes(uint64_t gpa, const void* src, size_t len) {
     while (remaining > 0) {
         uint64_t page_idx = curr_gpa / page_size_;
         uint64_t offset = curr_gpa % page_size_;
-        size_t chunk = std::min(remaining, page_size_ - offset);
+        size_t chunk = std::min<size_t>(remaining, page_size_ - offset);
 
         uint8_t* page = ensure_page(page_idx, true);
         if (!page) return false;

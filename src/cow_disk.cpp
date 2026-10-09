@@ -1,4 +1,5 @@
 #include "lime/cow_disk.hpp"
+#include <cstring>
 
 namespace lime {
 

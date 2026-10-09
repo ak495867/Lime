@@ -28,21 +28,21 @@ jobs:
       - name: Build (Linux / macOS)
         if: runner.os != 'Windows'
         run: |
-          g++ -std=c++20 -O3 -Iinclude \
+          g++ -std=c++20 -O3 -Iinclude -Ithird_party \
               src/memory.cpp src/storage.cpp src/cow_disk.cpp src/devices.cpp \
               src/interrupts.cpp src/mmu.cpp src/hypervisor.cpp src/net_bridge.cpp \
               src/jit.cpp src/acpi.cpp src/pci.cpp src/firmware.cpp src/nvme.cpp \
-              src/x86_cpu.cpp src/vcpu.cpp src/scheduler.cpp src/vm.cpp src/cli.cpp src/main.cpp \
+              src/x86_cpu.cpp src/vcpu.cpp src/scheduler.cpp src/vm.cpp src/cli.cpp src/main.cpp src/async_io.cpp src/jit_x86.cpp \
               -o ${{ matrix.artifact_name }}
 
       - name: Build (Windows)
         if: runner.os == 'Windows'
         run: |
-          g++ -std=c++20 -O3 -Iinclude `
+          g++ -std=c++20 -O3 -Iinclude -Ithird_party `
               src/memory.cpp src/storage.cpp src/cow_disk.cpp src/devices.cpp `
               src/interrupts.cpp src/mmu.cpp src/hypervisor.cpp src/net_bridge.cpp `
               src/jit.cpp src/acpi.cpp src/pci.cpp src/firmware.cpp src/nvme.cpp `
-              src/x86_cpu.cpp src/vcpu.cpp src/scheduler.cpp src/vm.cpp src/cli.cpp src/main.cpp `
+              src/x86_cpu.cpp src/vcpu.cpp src/scheduler.cpp src/vm.cpp src/cli.cpp src/main.cpp src/async_io.cpp src/jit_x86.cpp `
               -lws2_32 -lWinHvPlatform -luser32 -lgdi32 -o ${{ matrix.artifact_name }}
 
       - name: Upload Release Asset

@@ -8,8 +8,8 @@ build/
 bin/
 
 # Compiled Linux/macOS binaries
-lime
-test_lime
+/lime
+/test_lime
 
 .agents/
 
