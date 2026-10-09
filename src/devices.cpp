@@ -1,4 +1,5 @@
 #include "lime/devices.hpp"
+#include <algorithm>
 #include "lime/async_io.hpp"
 #include <iostream>
 #include <thread>
