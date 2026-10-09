@@ -1,4 +1,5 @@
 #include "lime/devices.hpp"
+#include "lime/async_io.hpp"
 #include <iostream>
 #include <thread>
 #include <condition_variable>
@@ -117,15 +118,41 @@ void VirtIOBlockDevice::stop_worker() {
 }
 
 void VirtIOBlockDevice::submit_async_read(uint64_t lba, uint32_t sector_count, void* buffer, std::function<void(bool)> callback) {
+    if (async_engine_ && async_engine_->is_open() && disk_) {
+        auto cb = std::move(callback);
+        submit_sparse_range(async_engine_, disk_, AsyncOpType::READ,
+                            lba * SparseDisk::SECTOR_SIZE, buffer,
+                            static_cast<size_t>(sector_count) * SparseDisk::SECTOR_SIZE,
+                            [cb](const AsyncCompletion& c) { if (cb) cb(c.success); });
+        return;
+    }
     std::lock_guard<std::mutex> lock(req_mutex_);
     pending_requests_.push({AsyncRequest::OpType::READ, lba, sector_count, buffer, callback});
     cv_.notify_one();
 }
 
 void VirtIOBlockDevice::submit_async_write(uint64_t lba, uint32_t sector_count, const void* buffer, std::function<void(bool)> callback) {
+    if (async_engine_ && async_engine_->is_open() && disk_) {
+        auto cb = std::move(callback);
+        submit_sparse_range(async_engine_, disk_, AsyncOpType::WRITE,
+                            lba * SparseDisk::SECTOR_SIZE, const_cast<void*>(buffer),
+                            static_cast<size_t>(sector_count) * SparseDisk::SECTOR_SIZE,
+                            [cb](const AsyncCompletion& c) { if (cb) cb(c.success); });
+        return;
+    }
     std::lock_guard<std::mutex> lock(req_mutex_);
     pending_requests_.push({AsyncRequest::OpType::WRITE, lba, sector_count, const_cast<void*>(buffer), callback});
     cv_.notify_one();
+}
+
+void VirtIOBlockDevice::attach_async_engine(std::shared_ptr<AsyncIOEngine> engine) {
+    async_engine_ = std::move(engine);
+}
+
+void VirtIOBlockDevice::tick() {
+    if (async_engine_) {
+        async_engine_->poll(16);
+    }
 }
 
 uint32_t VirtIOBlockDevice::read(uint64_t offset, size_t) {

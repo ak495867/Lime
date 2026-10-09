@@ -1,12 +1,30 @@
 #include "lime/nvme.hpp"
+#include "lime/async_io.hpp"
 #include <cstring>
 #include <iostream>
+#include <vector>
 
 namespace lime {
 
 NVMeController::NVMeController(std::shared_ptr<SparseDisk> disk, std::shared_ptr<MemoryManager> mem, uint64_t base_addr)
     : PCIDevice(0x1B4B, 0x0108, 0x01, 0x08), disk_(disk), mem_(mem) {
     base_addr_ = base_addr;
+}
+
+void NVMeController::attach_async_engine(std::shared_ptr<AsyncIOEngine> engine) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    async_engine_ = std::move(engine);
+}
+
+size_t NVMeController::poll_async(size_t max_completions) {
+    if (!async_engine_) return 0;
+    return async_engine_->poll(max_completions);
+}
+
+void NVMeController::tick() {
+    // Called from DeviceBus::tick_all(): harvest finished I/O without ever
+    // blocking the vCPU execution loop.
+    poll_async(32);
 }
 
 uint32_t NVMeController::read(uint64_t offset, size_t size) {
@@ -116,7 +134,46 @@ void NVMeController::process_io_sq() {
     std::memcpy(&length, &sqe[48], 2);
     
     uint32_t sector_count = length + 1;
-    std::vector<uint8_t> buffer(sector_count * 512, 0);
+    size_t total_bytes = static_cast<size_t>(sector_count) * 512;
+
+    // ------------------------------------------------------------------
+    // Asynchronous path: stage the transfer, hand the backing-file I/O to
+    // the async engine, and return immediately. The completion callback
+    // (invoked from poll_async/tick) copies data into guest memory and
+    // posts the completion queue entry.
+    // ------------------------------------------------------------------
+    if (async_engine_ && async_engine_->is_open() && (opcode == 0x01 || opcode == 0x02)) {
+        bool is_read = (opcode == 0x02);
+        auto staging = std::make_shared<std::vector<uint8_t>>(total_bytes, 0);
+        if (!is_read) {
+            mem_->read_bytes(prp1, staging->data(), total_bytes);  // snapshot before returning to the vCPU
+        }
+
+        auto mem = mem_;
+        uint64_t cq_base = io_cq_base;
+        uint64_t byte_offset = slba * 512ULL;
+
+        bool submitted = submit_sparse_range(
+            async_engine_, disk_,
+            is_read ? AsyncOpType::READ : AsyncOpType::WRITE,
+            byte_offset, staging->data(), total_bytes,
+            [mem, staging, cid, prp1, is_read, total_bytes, cq_base](const AsyncCompletion& c) {
+                if (is_read && c.success) {
+                    mem->write_bytes(prp1, staging->data(), total_bytes);
+                }
+                std::vector<uint8_t> cqe(16, 0);
+                cqe[12] = cid & 0xFF;
+                cqe[13] = (cid >> 8) & 0xFF;
+                cqe[14] = c.success ? 0 : 1;  // status
+                cqe[15] = 1;                  // phase tag
+                mem->write_bytes(cq_base, cqe.data(), 16);
+            });
+        if (submitted) return;
+        // Submission rejected: fall through to the synchronous path below.
+    }
+    
+    uint32_t buffer_size = sector_count * 512;
+    std::vector<uint8_t> buffer(buffer_size, 0);
     
     if (opcode == 0x02) { // Read
         disk_->read_sectors(slba, sector_count, buffer.data());

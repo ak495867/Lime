@@ -67,11 +67,27 @@ bool VirtualMachine::init() {
                 pci_bus_->attach_device(0, 4, 0, nvme_);
             }
         }
+
+        // Asynchronous block I/O backend (IOCP / io_uring / worker pool).
+        async_io_ = AsyncIOEngine::create_best();
+        if (async_io_ && !async_io_->open(config_.sparse_disk_path)) {
+            async_io_.reset();
+        }
+        if (async_io_) {
+            if (block_device_) block_device_->attach_async_engine(async_io_);
+            if (nvme_) nvme_->attach_async_engine(async_io_);
+            std::cout << "[LIME] Async I/O backend active: " << async_io_->backend_name() << std::endl;
+        }
+
+        if (block_device_) {
+            block_device_->start_worker();
+        }
     }
 
     if (config_.enable_net) {
         net_device_ = std::make_shared<VirtIONetDevice>(memory_, 0x10002000);
         bus_->register_device(net_device_);
+        net_device_->start_worker();
 
         net_bridge_ = std::make_shared<HostNetBridge>(net_device_);
         net_bridge_->start_bridge(8888);
@@ -227,6 +243,9 @@ void VirtualMachine::stop() {
     if (scheduler_) {
         scheduler_->stop();
     }
+    if (nvme_) {
+        nvme_->poll_async(1024);  // drain outstanding async block I/O
+    }
 }
 
 ResourceMetrics VirtualMachine::get_metrics() const {
@@ -245,6 +264,7 @@ std::shared_ptr<VCPU> VirtualMachine::vcpu() const { return vcpu_; }
 std::shared_ptr<X86CPUDecoder> VirtualMachine::x86_vcpu() const { return x86_vcpu_; }
 std::shared_ptr<ResourceScheduler> VirtualMachine::scheduler() const { return scheduler_; }
 std::shared_ptr<HostHypervisor> VirtualMachine::hypervisor() const { return hypervisor_; }
+std::shared_ptr<AsyncIOEngine> VirtualMachine::async_io() const { return async_io_; }
 const VMConfig& VirtualMachine::config() const { return config_; }
 
 std::vector<std::shared_ptr<VCPU>> VirtualMachine::vcpus() const { return vcpus_; }

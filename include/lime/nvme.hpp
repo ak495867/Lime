@@ -2,13 +2,14 @@
 #define LIME_NVME_HPP
 
 #include <cstdint>
-#include <vector>
 #include <memory>
 #include <mutex>
 #include "lime/pci.hpp"
 #include "lime/storage.hpp"
 
 namespace lime {
+
+class AsyncIOEngine;
 
 #pragma pack(push, 1)
 struct NVMeControllerRegs {
@@ -41,6 +42,15 @@ public:
 
     uint64_t capacity_bytes() const;
 
+    // Asynchronous I/O: when an engine is attached, I/O submission queue
+    // doorbells return control to the vCPU immediately; completions are
+    // harvested from poll_async()/tick().
+    void attach_async_engine(std::shared_ptr<AsyncIOEngine> engine);
+    size_t poll_async(size_t max_completions = 64);
+    void tick() override;
+
+    std::shared_ptr<AsyncIOEngine> async_engine() const { return async_engine_; }
+
 private:
     std::shared_ptr<SparseDisk> disk_;
     std::shared_ptr<MemoryManager> mem_;
@@ -48,6 +58,7 @@ private:
     uint32_t admin_sq_head_{0};
     uint32_t admin_cq_tail_{0};
     mutable std::mutex mutex_;
+    std::shared_ptr<AsyncIOEngine> async_engine_;
 };
 
 }

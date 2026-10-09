@@ -17,6 +17,9 @@
 
 namespace lime {
 
+class X86JIT;
+struct NativeBlock;
+
 enum class VCPUState {
     RUNNING,
     IDLE_WAIT,
@@ -72,6 +75,12 @@ public:
 
     bool execute_compressed(uint16_t inst);
 
+    // Native JIT access: exposed for the asmjit backend, tests, and tooling.
+    uint64_t* regs_ptr() { return regs_.data(); }
+    uint64_t* pc_ptr() { return &pc_; }
+    void jit_execute_instruction(uint64_t inst_pc, uint32_t inst);
+    std::shared_ptr<X86JIT> native_jit() const { return native_jit_; }
+
 private:
     uint32_t fetch32(uint64_t addr, bool& fault);
     uint16_t fetch16(uint64_t addr, bool& fault);
@@ -84,6 +93,7 @@ private:
     std::shared_ptr<ClintDevice> clint_;
     std::shared_ptr<PlicDevice> plic_;
     std::shared_ptr<JITEngine> jit_;
+    std::shared_ptr<X86JIT> native_jit_;
 
     std::array<uint64_t, 32> regs_{};
     std::array<double, 32> fregs_{};

@@ -1,4 +1,5 @@
 #include "lime/vcpu.hpp"
+#include "lime/jit_x86.hpp"
 #include <iostream>
 
 namespace lime {
@@ -8,6 +9,14 @@ VCPU::VCPU(uint32_t id, std::shared_ptr<MemoryManager> mem, std::shared_ptr<Devi
     regs_.fill(0);
     mmu_ = std::make_shared<MMU>(mem_);
     jit_ = std::make_shared<JITEngine>();
+    native_jit_ = std::make_shared<X86JIT>();
+}
+
+void VCPU::jit_execute_instruction(uint64_t inst_pc, uint32_t inst) {
+    // Interpreter semantics assumed by execute_instruction(): pc_ already
+    // points past the instruction being executed.
+    pc_ = inst_pc + 4;
+    execute_instruction(inst);
 }
 
 void VCPU::attach_clint(std::shared_ptr<ClintDevice> clint) {
@@ -184,8 +193,19 @@ size_t VCPU::run_cycles(size_t max_cycles) {
 
         const BasicBlock* bb = jit_->lookup_or_compile(curr_pc, block_insts);
         if (bb) {
-            if (!bb->executor) compile_block(const_cast<BasicBlock&>(*bb));
-            if (!bb->executor(*this, executed)) break;
+            // Prefer the asmjit-native machine-code block; fall back to the
+            // threaded-code / interpreter path when the backend is absent or
+            // declined to compile this block.
+            NativeBlock* nb = native_jit_ ? native_jit_->lookup_or_compile(*bb) : nullptr;
+            if (nb && nb->entry) {
+                nb->exec_count++;
+                nb->entry(this, regs_.data(), &pc_);
+                executed += bb->ops.size();
+                if (state_.load() != VCPUState::RUNNING) break;
+            } else {
+                if (!bb->executor) compile_block(const_cast<BasicBlock&>(*bb));
+                if (!bb->executor(*this, executed)) break;
+            }
         } else {
             if (!step()) break;
             executed++;
@@ -695,6 +715,18 @@ bool VCPU::execute_compressed(uint16_t inst) {
 }
 
 bool VCPU::execute_block_fast(const BasicBlock* bb, size_t& executed) {
+#if !defined(__GNUC__) && !defined(__clang__)
+    // Portable path for compilers without GCC computed-goto extensions.
+    for (const MicroOp& op : bb->ops) {
+        uint64_t inst_pc = pc_;
+        pc_ += 4;
+        execute_instruction(op.raw_inst);
+        executed++;
+        if (state_.load() != VCPUState::RUNNING) return false;
+        (void)inst_pc;
+    }
+    return true;
+#else
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wc99-designator"
 #pragma GCC diagnostic ignored "-Winitializer-overrides"
@@ -764,6 +796,7 @@ OP_FALLBACK:
     op++; executed++;
     if (op == end || state_.load() != VCPUState::RUNNING) return state_.load() == VCPUState::RUNNING;
     goto *dispatch_table[op->opcode];
+#endif
 }
 
 void VCPU::compile_block(BasicBlock& bb) {

@@ -29,12 +29,28 @@ public:
     SparseDisk() = default;
     ~SparseDisk();
 
+    // One contiguous portion of the virtual disk mapped to the backing file.
+    // `allocated == false` means the block is a sparse hole (file_offset invalid).
+    struct DiskRange {
+        uint64_t virtual_offset;
+        uint64_t file_offset;
+        size_t length;
+        bool allocated;
+    };
+
     static bool create(const std::string& path, uint64_t capacity_bytes, uint32_t block_size = 65536);
     bool open(const std::string& path);
     void close();
 
     bool read_sectors(uint64_t lba, uint32_t sector_count, void* buffer);
     bool write_sectors(uint64_t lba, uint32_t sector_count, const void* buffer);
+
+    // Async-I/O support: map a byte range to backing-file segments and (for
+    // writes) ensure every block in the range is allocated on the host file.
+    bool preallocate_range(uint64_t byte_offset, size_t length);
+    bool map_range(uint64_t byte_offset, size_t length, std::vector<DiskRange>& out) const;
+
+    const std::string& path() const { return file_path_; }
 
     uint64_t capacity_bytes() const;
     uint64_t host_file_size() const;
@@ -43,7 +59,7 @@ public:
     bool is_open() const;
 
 private:
-    uint64_t get_block_file_offset(uint32_t block_index);
+    uint64_t get_block_file_offset(uint32_t block_index) const;
     uint32_t allocate_block(uint32_t block_index);
 
     std::string file_path_;

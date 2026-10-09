@@ -16,6 +16,8 @@
 
 namespace lime {
 
+class AsyncIOEngine;
+
 #pragma pack(push, 1)
 struct vring_desc {
     uint64_t addr;
@@ -97,9 +99,16 @@ public:
     void submit_async_read(uint64_t lba, uint32_t sector_count, void* buffer, std::function<void(bool)> callback = nullptr);
     void submit_async_write(uint64_t lba, uint32_t sector_count, const void* buffer, std::function<void(bool)> callback = nullptr);
 
+    // Route queued block I/O through the async engine (IOCP/io_uring) when
+    // attached; completions are harvested from tick() without blocking the
+    // vCPU loop.
+    void attach_async_engine(std::shared_ptr<AsyncIOEngine> engine);
+    void tick() override;
+
 private:
     std::shared_ptr<SparseDisk> disk_;
     std::shared_ptr<MemoryManager> mem_;
+    std::shared_ptr<AsyncIOEngine> async_engine_;
     uint64_t base_addr_;
     uint32_t status_{0};
     uint32_t vq_pfn_{0};

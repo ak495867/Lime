@@ -20,6 +20,7 @@
 #include "lime/x86_cpu.hpp"
 #include "lime/vcpu.hpp"
 #include "lime/scheduler.hpp"
+#include "lime/async_io.hpp"
 
 namespace lime {
 
@@ -68,6 +69,7 @@ public:
     std::shared_ptr<X86CPUDecoder> x86_vcpu() const;
     std::shared_ptr<ResourceScheduler> scheduler() const;
     std::shared_ptr<HostHypervisor> hypervisor() const;
+    std::shared_ptr<AsyncIOEngine> async_io() const;
     const VMConfig& config() const;
 
 private:
@@ -82,6 +84,7 @@ private:
     std::shared_ptr<X86CPUDecoder> x86_vcpu_;
     std::shared_ptr<ResourceScheduler> scheduler_;
     std::shared_ptr<HostHypervisor> hypervisor_;
+    std::shared_ptr<AsyncIOEngine> async_io_;  // declared last: destroyed first
     std::shared_ptr<ClintDevice> clint_;
     std::shared_ptr<PlicDevice> plic_;
     std::shared_ptr<NVMeController> nvme_;

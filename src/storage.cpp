@@ -103,13 +103,59 @@ uint32_t SparseDisk::allocate_block(uint32_t block_index) {
     return file_block_idx;
 }
 
-uint64_t SparseDisk::get_block_file_offset(uint32_t block_index) {
+uint64_t SparseDisk::get_block_file_offset(uint32_t block_index) const {
     if (block_index >= header_.total_blocks) return 0;
     uint32_t file_block_idx = block_table_[block_index];
     if (file_block_idx == 0xFFFFFFFF) return 0;
 
     uint64_t header_table_size = sizeof(LimeSparseDiskHeader) + (header_.total_blocks * sizeof(uint32_t));
     return header_table_size + (static_cast<uint64_t>(file_block_idx) * header_.block_size);
+}
+
+bool SparseDisk::preallocate_range(uint64_t byte_offset, size_t length) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!is_open_) return false;
+    if (length == 0) return true;
+    if (byte_offset + length > header_.virtual_capacity_bytes) return false;
+
+    uint64_t end = byte_offset + length;
+    uint64_t pos = byte_offset;
+    while (pos < end) {
+        uint32_t blk_idx = static_cast<uint32_t>(pos / header_.block_size);
+        if (blk_idx >= header_.total_blocks) return false;
+        if (block_table_[blk_idx] == 0xFFFFFFFF) {
+            allocate_block(blk_idx);
+        }
+        pos += header_.block_size - (pos % header_.block_size);
+    }
+    return true;
+}
+
+bool SparseDisk::map_range(uint64_t byte_offset, size_t length, std::vector<DiskRange>& out) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!is_open_) return false;
+    if (length == 0) return true;
+    if (byte_offset + length > header_.virtual_capacity_bytes) return false;
+
+    out.clear();
+    uint64_t remaining = length;
+    uint64_t pos = byte_offset;
+    while (remaining > 0) {
+        uint32_t blk_idx = static_cast<uint32_t>(pos / header_.block_size);
+        uint32_t offset_in_blk = static_cast<uint32_t>(pos % header_.block_size);
+        size_t chunk = static_cast<size_t>(std::min<uint64_t>(remaining, header_.block_size - offset_in_blk));
+
+        DiskRange r;
+        r.virtual_offset = pos;
+        r.length = chunk;
+        r.allocated = (block_table_[blk_idx] != 0xFFFFFFFF);
+        r.file_offset = r.allocated ? (get_block_file_offset(blk_idx) + offset_in_blk) : 0;
+        out.push_back(r);
+
+        pos += chunk;
+        remaining -= chunk;
+    }
+    return true;
 }
 
 bool SparseDisk::read_sectors(uint64_t lba, uint32_t sector_count, void* buffer) {

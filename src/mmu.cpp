@@ -5,20 +5,14 @@ namespace lime {
 MMU::MMU(std::shared_ptr<MemoryManager> mem) : mem_(mem) {}
 
 uint64_t MMU::translate(uint64_t va, AccessType access, PrivilegeMode mode, uint64_t satp, bool& page_fault) {
+    (void)access;
+    (void)mode;
     page_fault = false;
     uint64_t satp_mode = satp >> 60;
 
-    if (mode == PrivilegeMode::MACHINE) {
-        uint64_t cr3 = satp & 0xFFFFFFFFFFFFF000ULL;
-        uint64_t pa = 0;
-        PageFaultInfo fault_info;
-        if (walk_x86_4level(va, access, mode, cr3, pa, fault_info)) {
-            return pa;
-        }
-        page_fault = true;
-        return 0;
-    }
-
+    // Bare mode: M-mode (or S/U-mode with paging disabled) does not translate.
+    // RISC-V address translation is driven purely by satp.MODE — the x86
+    // walkers are exposed separately through translate_x86_64().
     if (satp_mode == 0) {
         return va;
     }
@@ -245,6 +239,25 @@ bool MMU::walk_x86_5level(uint64_t va, AccessType access, PrivilegeMode mode, ui
 
     out_pa = (pte & 0x000FFFFFFFFFF000ULL) | offset;
     return true;
+}
+
+uint64_t MMU::translate_x86_64(uint64_t va, AccessType access, PrivilegeMode mode, uint64_t cr3, bool& page_fault) {
+    page_fault = false;
+    uint64_t pa = 0;
+    PageFaultInfo fault_info;
+
+    // Prefer the 4-level walk (canonical 48-bit layout); fall back to the
+    // 5-level walk for addresses using the 57-bit canonical form.
+    if (walk_x86_4level(va, access, mode, cr3, pa, fault_info)) {
+        return pa;
+    }
+    if ((va >> 47) != 0 && (va >> 47) != 0x1FFFFFFFFFFFFFULL) {
+        if (walk_x86_5level(va, access, mode, cr3, pa, fault_info)) {
+            return pa;
+        }
+    }
+    page_fault = true;
+    return 0;
 }
 
 bool MMU::check_page_fault(uint64_t pa, AccessType access, PrivilegeMode mode) {
