@@ -10,6 +10,11 @@ MemoryManager::MemoryManager(size_t total_ram_bytes, size_t page_size)
 }
 
 uint8_t* MemoryManager::ensure_page(uint64_t page_index, bool is_write) {
+    // Guest physical addresses are bounded by the configured RAM size. Keep
+    // out-of-range accesses from silently allocating arbitrary host memory.
+    if (page_index >= total_pages_) {
+        return nullptr;
+    }
     if (pages_.size() >= total_pages_ && pages_.find(page_index) == pages_.end()) {
         return nullptr;
     }
@@ -142,7 +147,7 @@ size_t MemoryManager::inflate_balloon(size_t target_pages) {
     size_t inflated = 0;
     for (auto& pair : page_table_) {
         if (inflated >= target_pages) break;
-        if (pair.second.allocated && !pair.second.ballooned) {
+        if (pair.second.allocated && !pair.second.ballooned && !pair.second.dirty) {
             pair.second.ballooned = true;
             pages_.erase(pair.first);
             reclaimed_bytes_ += page_size_;
@@ -175,7 +180,9 @@ size_t MemoryManager::reclaim_idle_pages(uint64_t current_tick, uint64_t max_idl
     std::lock_guard<std::mutex> lock(mutex_);
     size_t reclaimed = 0;
     for (auto& pair : page_table_) {
-        if (pair.second.allocated && !pair.second.ballooned) {
+        // Page contents are currently backed only by this map, so discarding
+        // dirty pages would corrupt guest state. Reclaim only clean pages.
+        if (pair.second.allocated && !pair.second.ballooned && !pair.second.dirty) {
             if (current_tick > pair.second.last_accessed &&
                 (current_tick - pair.second.last_accessed) > max_idle_duration) {
                 pair.second.ballooned = true;

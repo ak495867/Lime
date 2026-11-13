@@ -18,6 +18,9 @@ SparseDisk::~SparseDisk() {
 }
 
 bool SparseDisk::create(const std::string& path, uint64_t capacity_bytes, uint32_t block_size) {
+    if (capacity_bytes == 0 || block_size == 0) return false;
+    const uint64_t total_blocks = capacity_bytes / block_size + (capacity_bytes % block_size != 0);
+    if (total_blocks > UINT32_MAX) return false;
     std::ofstream out(path, std::ios::binary | std::ios::trunc);
     if (!out.is_open()) return false;
 
@@ -29,7 +32,7 @@ bool SparseDisk::create(const std::string& path, uint64_t capacity_bytes, uint32
     hdr.version = 1;
     hdr.virtual_capacity_bytes = capacity_bytes;
     hdr.block_size = block_size;
-    hdr.total_blocks = static_cast<uint32_t>((capacity_bytes + block_size - 1) / block_size);
+    hdr.total_blocks = static_cast<uint32_t>(total_blocks);
     hdr.allocated_blocks = 0;
 
     out.write(reinterpret_cast<const char*>(&hdr), sizeof(hdr));
@@ -57,6 +60,14 @@ bool SparseDisk::open(const std::string& path) {
 
     if (header_.magic[0] != 'L' || header_.magic[1] != 'I' ||
         header_.magic[2] != 'M' || header_.magic[3] != 'E') {
+        close();
+        return false;
+    }
+
+    if (header_.version != 1 || header_.block_size == 0 ||
+        header_.total_blocks == 0 ||
+        (header_.virtual_capacity_bytes / header_.block_size +
+         (header_.virtual_capacity_bytes % header_.block_size != 0)) != header_.total_blocks) {
         close();
         return false;
     }
@@ -116,7 +127,7 @@ bool SparseDisk::preallocate_range(uint64_t byte_offset, size_t length) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!is_open_) return false;
     if (length == 0) return true;
-    if (byte_offset + length > header_.virtual_capacity_bytes) return false;
+    if (byte_offset > header_.virtual_capacity_bytes || length > header_.virtual_capacity_bytes - byte_offset) return false;
 
     uint64_t end = byte_offset + length;
     uint64_t pos = byte_offset;
@@ -135,7 +146,7 @@ bool SparseDisk::map_range(uint64_t byte_offset, size_t length, std::vector<Disk
     std::lock_guard<std::mutex> lock(mutex_);
     if (!is_open_) return false;
     if (length == 0) return true;
-    if (byte_offset + length > header_.virtual_capacity_bytes) return false;
+    if (byte_offset > header_.virtual_capacity_bytes || length > header_.virtual_capacity_bytes - byte_offset) return false;
 
     out.clear();
     uint64_t remaining = length;
@@ -162,10 +173,12 @@ bool SparseDisk::read_sectors(uint64_t lba, uint32_t sector_count, void* buffer)
     std::lock_guard<std::mutex> lock(mutex_);
     if (!is_open_) return false;
 
+    if (!buffer || lba > UINT64_MAX / SECTOR_SIZE) return false;
     uint64_t byte_offset = lba * SECTOR_SIZE;
+    if (sector_count > (UINT64_MAX - byte_offset) / SECTOR_SIZE) return false;
     uint64_t total_bytes = static_cast<uint64_t>(sector_count) * SECTOR_SIZE;
 
-    if (byte_offset + total_bytes > header_.virtual_capacity_bytes) {
+    if (byte_offset > header_.virtual_capacity_bytes || total_bytes > header_.virtual_capacity_bytes - byte_offset) {
         return false;
     }
 
@@ -184,6 +197,8 @@ bool SparseDisk::read_sectors(uint64_t lba, uint32_t sector_count, void* buffer)
         } else {
             file_.seekg(file_offset + offset_in_blk, std::ios::beg);
             file_.read(reinterpret_cast<char*>(out), chunk);
+            if (file_.gcount() != static_cast<std::streamsize>(chunk)) return false;
+            file_.clear();
         }
 
         out += chunk;
@@ -198,10 +213,12 @@ bool SparseDisk::write_sectors(uint64_t lba, uint32_t sector_count, const void* 
     std::lock_guard<std::mutex> lock(mutex_);
     if (!is_open_) return false;
 
+    if (!buffer || lba > UINT64_MAX / SECTOR_SIZE) return false;
     uint64_t byte_offset = lba * SECTOR_SIZE;
+    if (sector_count > (UINT64_MAX - byte_offset) / SECTOR_SIZE) return false;
     uint64_t total_bytes = static_cast<uint64_t>(sector_count) * SECTOR_SIZE;
 
-    if (byte_offset + total_bytes > header_.virtual_capacity_bytes) {
+    if (byte_offset > header_.virtual_capacity_bytes || total_bytes > header_.virtual_capacity_bytes - byte_offset) {
         return false;
     }
 
@@ -222,6 +239,7 @@ bool SparseDisk::write_sectors(uint64_t lba, uint32_t sector_count, const void* 
 
         file_.seekp(file_offset + offset_in_blk, std::ios::beg);
         file_.write(reinterpret_cast<const char*>(in), chunk);
+        if (!file_) return false;
         file_.flush();
 
         in += chunk;

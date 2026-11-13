@@ -1,4 +1,5 @@
 #include "lime/cow_disk.hpp"
+#include <algorithm>
 #include <cstring>
 
 namespace lime {
@@ -20,6 +21,11 @@ bool CoWSparseDisk::open(const std::string& base_path, const std::string& delta_
 
     if (!base_disk_->open(base_path)) return false;
     if (!delta_disk_->open(delta_path)) return false;
+    if (base_disk_->capacity_bytes() != delta_disk_->capacity_bytes() ||
+        base_disk_->block_size() != delta_disk_->block_size()) {
+        close();
+        return false;
+    }
 
     is_open_ = true;
     return true;
@@ -33,33 +39,39 @@ void CoWSparseDisk::close() {
 
 bool CoWSparseDisk::read_sectors(uint64_t lba, uint32_t sector_count, void* buffer) {
     if (!is_open_) return false;
+    if (!buffer || lba > UINT64_MAX / SparseDisk::SECTOR_SIZE) return false;
+    const uint64_t offset = lba * SparseDisk::SECTOR_SIZE;
+    const uint64_t bytes = static_cast<uint64_t>(sector_count) * SparseDisk::SECTOR_SIZE;
+    if (offset > capacity_bytes() || bytes > capacity_bytes() - offset) return false;
+
     uint8_t* out = static_cast<uint8_t*>(buffer);
-
-    for (uint32_t s = 0; s < sector_count; ++s) {
-        uint64_t curr_lba = lba + s;
-        uint64_t byte_pos = curr_lba * SparseDisk::SECTOR_SIZE;
-        uint32_t blk_idx = static_cast<uint32_t>(byte_pos / delta_disk_->block_size());
-
-        std::vector<uint8_t> tmp(SparseDisk::SECTOR_SIZE, 0);
-
-        if (delta_disk_->read_sectors(curr_lba, 1, tmp.data())) {
-            bool has_data = false;
-            for (uint8_t b : tmp) {
-                if (b != 0) { has_data = true; break; }
-            }
-            if (has_data || delta_disk_->allocated_blocks() > 0) {
-                std::memcpy(out + (s * SparseDisk::SECTOR_SIZE), tmp.data(), SparseDisk::SECTOR_SIZE);
-                continue;
-            }
+    uint64_t pos = offset;
+    uint64_t remaining = bytes;
+    while (remaining) {
+        const uint32_t block_size = delta_disk_->block_size();
+        const size_t chunk = static_cast<size_t>(std::min<uint64_t>(remaining, block_size - (pos % block_size)));
+        std::vector<SparseDisk::DiskRange> ranges;
+        if (!delta_disk_->map_range(pos, chunk, ranges) || ranges.empty()) return false;
+        if (ranges.front().allocated) {
+            if (!delta_disk_->read_sectors(pos / SparseDisk::SECTOR_SIZE,
+                    static_cast<uint32_t>(chunk / SparseDisk::SECTOR_SIZE), out)) return false;
+        } else if (!base_disk_->read_sectors(pos / SparseDisk::SECTOR_SIZE,
+                       static_cast<uint32_t>(chunk / SparseDisk::SECTOR_SIZE), out)) {
+            return false;
         }
-        base_disk_->read_sectors(curr_lba, 1, out + (s * SparseDisk::SECTOR_SIZE));
+        pos += chunk;
+        out += chunk;
+        remaining -= chunk;
     }
-
     return true;
 }
 
 bool CoWSparseDisk::write_sectors(uint64_t lba, uint32_t sector_count, const void* buffer) {
     if (!is_open_) return false;
+    if (!buffer || lba > UINT64_MAX / SparseDisk::SECTOR_SIZE) return false;
+    const uint64_t offset = lba * SparseDisk::SECTOR_SIZE;
+    const uint64_t bytes = static_cast<uint64_t>(sector_count) * SparseDisk::SECTOR_SIZE;
+    if (offset > capacity_bytes() || bytes > capacity_bytes() - offset) return false;
     return delta_disk_->write_sectors(lba, sector_count, buffer);
 }
 

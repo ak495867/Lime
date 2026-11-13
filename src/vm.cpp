@@ -45,12 +45,17 @@ bool VirtualMachine::init() {
     console_ = std::make_shared<UartConsoleDevice>(0x10000000);
     bus_->register_device(console_);
 
+    bool cow_mode = false;
     if (!config_.delta_disk_path.empty() && !config_.sparse_disk_path.empty()) {
         cow_disk_ = std::make_shared<CoWSparseDisk>();
         if (!cow_disk_->open(config_.sparse_disk_path, config_.delta_disk_path)) {
             CoWSparseDisk::create_overlay(config_.sparse_disk_path, config_.delta_disk_path);
             cow_disk_->open(config_.sparse_disk_path, config_.delta_disk_path);
         }
+        if (!cow_disk_->is_open()) {
+            return false;
+        }
+        cow_mode = true;
     } else if (!config_.sparse_disk_path.empty()) {
         disk_ = std::make_shared<SparseDisk>();
         if (!disk_->open(config_.sparse_disk_path)) {
@@ -84,6 +89,12 @@ bool VirtualMachine::init() {
         }
     }
 
+    if (cow_mode) {
+        // The current VirtIO/NVMe device interfaces accept SparseDisk, not
+        // CoWSparseDisk. Fail explicitly instead of silently bypassing CoW.
+        return false;
+    }
+
     if (config_.enable_net) {
         net_device_ = std::make_shared<VirtIONetDevice>(memory_, 0x10002000);
         bus_->register_device(net_device_);
@@ -105,7 +116,7 @@ bool VirtualMachine::init() {
 
     if (config_.target_arch == TargetArch::X86_64) {
         x86_vcpu_ = std::make_shared<X86CPUDecoder>(memory_, bus_);
-        x86_vcpu_->reset(0x7C00);
+        x86_vcpu_->reset(entry_point_);
     } else {
 
         for (uint32_t i = 0; i < config_.cpu_count; ++i) {
