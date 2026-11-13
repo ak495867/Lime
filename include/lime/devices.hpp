@@ -84,7 +84,7 @@ private:
 
 class VirtIOBlockDevice : public Device {
 public:
-    VirtIOBlockDevice(std::shared_ptr<SparseDisk> disk, std::shared_ptr<MemoryManager> mem, uint64_t base_addr = 0x10001000);
+    VirtIOBlockDevice(std::shared_ptr<BlockStorage> disk, std::shared_ptr<MemoryManager> mem, uint64_t base_addr = 0x10001000);
     ~VirtIOBlockDevice() override;
 
     std::string name() const override { return "VirtIO-Block"; }
@@ -106,7 +106,7 @@ public:
     void tick() override;
 
 private:
-    std::shared_ptr<SparseDisk> disk_;
+    std::shared_ptr<BlockStorage> disk_;
     std::shared_ptr<MemoryManager> mem_;
     std::shared_ptr<AsyncIOEngine> async_engine_;
     uint64_t base_addr_;

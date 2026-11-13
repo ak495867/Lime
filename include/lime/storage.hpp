@@ -8,6 +8,7 @@
 #include <mutex>
 #include <list>
 #include <unordered_map>
+#include <chrono>
 
 namespace lime {
 
@@ -22,9 +23,19 @@ struct LimeSparseDiskHeader {
 };
 #pragma pack(pop)
 
-class SparseDisk {
+class BlockStorage {
 public:
-    static const uint32_t SECTOR_SIZE = 512;
+    static constexpr uint32_t SECTOR_SIZE = 512;
+    virtual ~BlockStorage() = default;
+    virtual bool read_sectors(uint64_t lba, uint32_t sector_count, void* buffer) = 0;
+    virtual bool write_sectors(uint64_t lba, uint32_t sector_count, const void* buffer) = 0;
+    virtual uint64_t capacity_bytes() const = 0;
+    virtual bool is_open() const = 0;
+};
+
+class SparseDisk : public BlockStorage {
+public:
+    static constexpr uint32_t SECTOR_SIZE = BlockStorage::SECTOR_SIZE;
 
     SparseDisk() = default;
     ~SparseDisk();
@@ -42,8 +53,8 @@ public:
     bool open(const std::string& path);
     void close();
 
-    bool read_sectors(uint64_t lba, uint32_t sector_count, void* buffer);
-    bool write_sectors(uint64_t lba, uint32_t sector_count, const void* buffer);
+    bool read_sectors(uint64_t lba, uint32_t sector_count, void* buffer) override;
+    bool write_sectors(uint64_t lba, uint32_t sector_count, const void* buffer) override;
 
     // Async-I/O support: map a byte range to backing-file segments and (for
     // writes) ensure every block in the range is allocated on the host file.
@@ -52,11 +63,11 @@ public:
 
     const std::string& path() const { return file_path_; }
 
-    uint64_t capacity_bytes() const;
+    uint64_t capacity_bytes() const override;
     uint64_t host_file_size() const;
     uint32_t block_size() const;
     uint32_t allocated_blocks() const;
-    bool is_open() const;
+    bool is_open() const override;
 
 private:
     uint64_t get_block_file_offset(uint32_t block_index) const;

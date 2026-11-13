@@ -20,6 +20,9 @@
 #include <iostream>
 #include <cassert>
 #include <chrono>
+#include <atomic>
+#include <thread>
+#include <fstream>
 #include <vector>
 #include <string>
 #include <filesystem>
@@ -34,15 +37,87 @@ void test_memory_subsystem() {
     assert(mem.allocated_bytes() == 4096);
     assert(mem.fault_count() == 1);
 
+    // Dirty pages have no backing store and must remain resident. A read-only
+    // page may be discarded and is recreated as zero on its next access.
+    assert(mem.read8(0x2000) == 0);
+
     size_t inflated = mem.inflate_balloon(1);
     assert(inflated == 1);
     assert(mem.reclaimed_bytes() == 4096);
+    assert(mem.read32(0x1000) == 0xDEADBEEF);
 
     size_t deflated = mem.deflate_balloon(1);
     assert(deflated == 1);
     assert(mem.reclaimed_bytes() == 0);
 
     std::cout << "[TEST PASSED] Memory Subsystem" << std::endl << std::flush;
+}
+
+void test_sparse_disk_and_cow() {
+    namespace fs = std::filesystem;
+    const auto root = fs::temp_directory_path() / "lime-storage-contract-test";
+    fs::create_directories(root);
+    const auto base_path = (root / "base.lime").string();
+    const auto delta_path = (root / "delta.lime").string();
+    const auto bad_path = (root / "bad.lime").string();
+    fs::remove(base_path);
+    fs::remove(delta_path);
+    fs::remove(bad_path);
+
+    constexpr uint64_t capacity = 1024 * 1024;
+    assert(lime::SparseDisk::create(base_path, capacity));
+    lime::SparseDisk base;
+    assert(base.open(base_path));
+    std::vector<uint8_t> base_sector(lime::SparseDisk::SECTOR_SIZE, 0xA5);
+    assert(base.write_sectors(0, 1, base_sector.data()));
+    base.close();
+
+    assert(lime::CoWSparseDisk::create_overlay(base_path, delta_path));
+    lime::CoWSparseDisk cow;
+    assert(cow.open(base_path, delta_path));
+    std::vector<uint8_t> actual(lime::SparseDisk::SECTOR_SIZE);
+    assert(cow.read_sectors(0, 1, actual.data()));
+    assert(actual == base_sector);
+
+    // A first write to a sparse delta block must copy up untouched base
+    // sectors; an all-zero sector must still override the base contents.
+    std::vector<uint8_t> zeros(lime::SparseDisk::SECTOR_SIZE, 0);
+    assert(cow.write_sectors(1, 1, zeros.data()));
+    std::vector<uint8_t> sector0(lime::SparseDisk::SECTOR_SIZE);
+    std::vector<uint8_t> sector1(lime::SparseDisk::SECTOR_SIZE, 0xFF);
+    assert(cow.read_sectors(0, 1, sector0.data()));
+    assert(cow.read_sectors(1, 1, sector1.data()));
+    assert(sector0 == base_sector);
+    assert(sector1 == zeros);
+
+    auto guest_mem = std::make_shared<lime::MemoryManager>(1024 * 1024);
+    auto storage = std::make_shared<lime::CoWSparseDisk>();
+    assert(storage->open(base_path, delta_path));
+    lime::VirtIOBlockDevice virtio(storage, guest_mem);
+    assert(virtio.read(0x80, 4) == capacity / lime::SparseDisk::SECTOR_SIZE);
+    lime::NVMeController nvme(storage, guest_mem);
+    assert(nvme.capacity_bytes() == capacity);
+
+    assert(lime::SparseDisk::create(bad_path, capacity / 2));
+    lime::SparseDisk bad_geometry;
+    assert(bad_geometry.open(bad_path));
+    bad_geometry.close();
+    lime::CoWSparseDisk mismatched;
+    assert(!mismatched.open(base_path, bad_path));
+
+    {
+        std::fstream file(base_path, std::ios::in | std::ios::out | std::ios::binary);
+        uint32_t invalid_version = 99;
+        file.seekp(sizeof(char) * 4);
+        file.write(reinterpret_cast<const char*>(&invalid_version), sizeof(invalid_version));
+    }
+    lime::SparseDisk malformed;
+    assert(!malformed.open(base_path));
+
+    storage->close();
+    cow.close();
+    fs::remove_all(root);
+    std::cout << "[TEST PASSED] Sparse disk validation & CoW copy-up" << std::endl << std::flush;
 }
 
 void test_acpi_and_pci_bus() {
@@ -67,7 +142,15 @@ void test_acpi_and_pci_bus() {
 
 void test_firmware_and_nvme() {
     auto mem = std::make_shared<lime::MemoryManager>(16 * 1024 * 1024);
-    bool fw_ok = lime::FirmwareLoader::load_firmware(mem, "", lime::FirmwareType::UEFI_OVMF, 0xFFF00000);
+    assert(!lime::FirmwareLoader::load_firmware(mem, "", lime::FirmwareType::UEFI_OVMF, 0xFFF00000));
+    const auto fw_path = (std::filesystem::temp_directory_path() / "lime-test-fw.bin").string();
+    const auto firmware = lime::FirmwareLoader::create_dummy_uefi_header();
+    {
+        std::ofstream file(fw_path, std::ios::binary | std::ios::trunc);
+        file.write(reinterpret_cast<const char*>(firmware.data()), firmware.size());
+    }
+    bool fw_ok = lime::FirmwareLoader::load_firmware(mem, fw_path, lime::FirmwareType::UEFI_OVMF, 0xFFF00000);
+    std::filesystem::remove(fw_path);
     assert(fw_ok);
 
     auto disk = std::make_shared<lime::SparseDisk>();
@@ -417,12 +500,12 @@ void test_native_jit() {
     // addi x1, x0, 7        -> 0x00700093
     // addi x2, x0, 35       -> 0x02300113
     // add  x3, x1, x2       -> 0x002081B3
-    // xor  x4, x3, x3       -> 0x00384213  (x4 = 0)
-    // or   x5, x3, x1       -> 0x0010E2B3  (x5 = 42)
+    // xor  x4, x3, x3       -> 0x0031C233  (x4 = 0)
+    // or   x5, x3, x0       -> 0x0001E2B3  (x5 = 42)
     // wfi                      0x10500073  -> IDLE_WAIT ends run_cycles
     std::vector<uint32_t> program = {
-        0x00700093u, 0x02300113u, 0x002081B3u, 0x00384213u,
-        0x0010E2B3u, 0x10500073u,
+        0x00700093u, 0x02300113u, 0x002081B3u, 0x0031C233u,
+        0x0001E2B3u, 0x10500073u,
     };
     uint64_t entry = 0x80000000;
     for (size_t i = 0; i < program.size(); ++i) {
@@ -443,8 +526,7 @@ void test_native_jit() {
 
     // JIT cache invalidation still leaves a working vCPU.
     cpu.native_jit()->clear_cache();
-    cpu.set_pc(entry);
-    cpu.set_state(lime::VCPUState::RUNNING);
+    cpu.reset(entry);
     executed = cpu.run_cycles(64);
     assert(cpu.get_reg(5) == 42);
 
@@ -591,6 +673,16 @@ void test_async_io_nonblocking() {
 }
 
 void test_full_vm_extensions() {
+    lime::VMConfig invalid_config;
+    invalid_config.ram_size_mb = 0;
+    lime::VirtualMachine invalid_vm(invalid_config);
+    assert(!invalid_vm.init());
+
+    lime::VMConfig unsupported_hardware;
+    unsupported_hardware.use_hardware_hypervisor = true;
+    lime::VirtualMachine hardware_vm(unsupported_hardware);
+    assert(!hardware_vm.init());
+
     lime::VMConfig config;
     config.ram_size_mb = 64;
     config.target_arch = lime::TargetArch::RISCV64;
@@ -613,6 +705,7 @@ void test_full_vm_extensions() {
 int main() {
     std::cout << "Starting Test Suite Execution..." << std::endl << std::flush;
     test_memory_subsystem();
+    test_sparse_disk_and_cow();
     test_acpi_and_pci_bus();
     test_firmware_and_nvme();
     test_x86_multi_arch();

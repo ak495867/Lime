@@ -4,6 +4,9 @@
 #include <chrono>
 #include <fstream>
 #include <cstring>
+#include <filesystem>
+#include <limits>
+#include <thread>
 
 namespace lime {
 
@@ -14,6 +17,18 @@ VirtualMachine::~VirtualMachine() {
 }
 
 bool VirtualMachine::init() {
+    if (config_.ram_size_mb == 0 || config_.cpu_count == 0 ||
+        config_.ram_size_mb > std::numeric_limits<size_t>::max() / (1024 * 1024) ||
+        config_.cpu_count > 64 ||
+        (config_.target_arch != TargetArch::RISCV64 && config_.target_arch != TargetArch::X86_64) ||
+        (config_.target_arch == TargetArch::X86_64 && config_.cpu_count != 1)) {
+        std::cerr << "[LIME] Invalid VM configuration (RAM, CPU count, or architecture)." << std::endl;
+        return false;
+    }
+    if (config_.use_hardware_hypervisor) {
+        std::cerr << "[LIME] Hardware virtualization is not implemented by this runtime." << std::endl;
+        return false;
+    }
     size_t ram_bytes = config_.ram_size_mb * 1024 * 1024;
     memory_ = std::make_shared<MemoryManager>(ram_bytes, 4096);
 
@@ -25,15 +40,15 @@ bool VirtualMachine::init() {
     }
 
     if (config_.enable_acpi) {
-        ACPITableBuilder::generate_tables(memory_, 0x000F0000, config_.cpu_count);
+        if (!ACPITableBuilder::generate_tables(memory_, 0x000F0000, config_.cpu_count)) return false;
     }
 
     if (!config_.kernel_path.empty()) {
-        FirmwareLoader::load_linux_kernel(memory_, config_.kernel_path, config_.initrd_path, config_.cmdline, 0x80200000, &entry_point_);
+        if (!FirmwareLoader::load_linux_kernel(memory_, config_.kernel_path, config_.initrd_path, config_.cmdline, 0x80200000, &entry_point_)) return false;
     } else if (!config_.firmware_path.empty() && !config_.ovmf_vars_path.empty()) {
-        FirmwareLoader::load_ovmf_split(memory_, config_.firmware_path, config_.ovmf_vars_path, 0xFFC00000, 0xFFB00000);
+        if (!FirmwareLoader::load_ovmf_split(memory_, config_.firmware_path, config_.ovmf_vars_path, 0xFFC00000, 0xFFB00000)) return false;
     } else if (!config_.firmware_path.empty()) {
-        FirmwareLoader::load_firmware(memory_, config_.firmware_path, FirmwareType::UEFI_OVMF, 0xFFF00000);
+        if (!FirmwareLoader::load_firmware(memory_, config_.firmware_path, FirmwareType::UEFI_OVMF, 0xFFF00000)) return false;
     }
 
     clint_ = std::make_shared<ClintDevice>(0x02000000);
@@ -45,55 +60,8 @@ bool VirtualMachine::init() {
     console_ = std::make_shared<UartConsoleDevice>(0x10000000);
     bus_->register_device(console_);
 
-    bool cow_mode = false;
-    if (!config_.delta_disk_path.empty() && !config_.sparse_disk_path.empty()) {
-        cow_disk_ = std::make_shared<CoWSparseDisk>();
-        if (!cow_disk_->open(config_.sparse_disk_path, config_.delta_disk_path)) {
-            CoWSparseDisk::create_overlay(config_.sparse_disk_path, config_.delta_disk_path);
-            cow_disk_->open(config_.sparse_disk_path, config_.delta_disk_path);
-        }
-        if (!cow_disk_->is_open()) {
-            return false;
-        }
-        cow_mode = true;
-    } else if (!config_.sparse_disk_path.empty()) {
-        disk_ = std::make_shared<SparseDisk>();
-        if (!disk_->open(config_.sparse_disk_path)) {
-            SparseDisk::create(config_.sparse_disk_path, 10ULL * 1024 * 1024 * 1024);
-            disk_->open(config_.sparse_disk_path);
-        }
-        block_device_ = std::make_shared<VirtIOBlockDevice>(disk_, memory_, 0x10001000);
-        bus_->register_device(block_device_);
-
-        if (config_.enable_nvme) {
-            nvme_ = std::make_shared<NVMeController>(disk_, memory_, 0x20000000);
-            bus_->register_device(nvme_);
-            if (pci_bus_) {
-                pci_bus_->attach_device(0, 4, 0, nvme_);
-            }
-        }
-
-        // Asynchronous block I/O backend (IOCP / io_uring / worker pool).
-        async_io_ = AsyncIOEngine::create_best();
-        if (async_io_ && !async_io_->open(config_.sparse_disk_path)) {
-            async_io_.reset();
-        }
-        if (async_io_) {
-            if (block_device_) block_device_->attach_async_engine(async_io_);
-            if (nvme_) nvme_->attach_async_engine(async_io_);
-            std::cout << "[LIME] Async I/O backend active: " << async_io_->backend_name() << std::endl;
-        }
-
-        if (block_device_) {
-            block_device_->start_worker();
-        }
-    }
-
-    if (cow_mode) {
-        // The current VirtIO/NVMe device interfaces accept SparseDisk, not
-        // CoWSparseDisk. Fail explicitly instead of silently bypassing CoW.
-        return false;
-    }
+    if (!config_.sparse_disk_path.empty() &&
+        !initialize_storage(config_.sparse_disk_path, config_.delta_disk_path)) return false;
 
     if (config_.enable_net) {
         net_device_ = std::make_shared<VirtIONetDevice>(memory_, 0x10002000);
@@ -101,7 +69,7 @@ bool VirtualMachine::init() {
         net_device_->start_worker();
 
         net_bridge_ = std::make_shared<HostNetBridge>(net_device_);
-        net_bridge_->start_bridge(8888);
+        if (!net_bridge_->start_bridge(8888)) return false;
     }
 
     balloon_device_ = std::make_shared<VirtIOBalloonDevice>(memory_, 0x10003000);
@@ -144,6 +112,55 @@ bool VirtualMachine::init() {
     return true;
 }
 
+bool VirtualMachine::initialize_storage(const std::string& base_path, const std::string& delta_path) {
+    if (!delta_path.empty()) {
+        if (!std::filesystem::exists(base_path)) {
+            std::cerr << "[LIME] CoW base image does not exist: " << base_path << std::endl;
+            return false;
+        }
+        cow_disk_ = std::make_shared<CoWSparseDisk>();
+        if (!cow_disk_->open(base_path, delta_path)) {
+            if (std::filesystem::exists(delta_path) ||
+                !CoWSparseDisk::create_overlay(base_path, delta_path) ||
+                !cow_disk_->open(base_path, delta_path)) {
+                std::cerr << "[LIME] Failed to open CoW base/delta images." << std::endl;
+                return false;
+            }
+        }
+        active_disk_ = cow_disk_;
+    } else {
+        disk_ = std::make_shared<SparseDisk>();
+        if (!disk_->open(base_path)) {
+            if (std::filesystem::exists(base_path) ||
+                !SparseDisk::create(base_path, 10ULL * 1024 * 1024 * 1024) ||
+                !disk_->open(base_path)) {
+                std::cerr << "[LIME] Failed to open or create disk image: " << base_path << std::endl;
+                return false;
+            }
+        }
+        active_disk_ = disk_;
+
+        async_io_ = AsyncIOEngine::create_best();
+        if (async_io_ && !async_io_->open(base_path)) async_io_.reset();
+        if (async_io_) {
+            std::cout << "[LIME] Async I/O backend active: " << async_io_->backend_name() << std::endl;
+        }
+    }
+
+    block_device_ = std::make_shared<VirtIOBlockDevice>(active_disk_, memory_, 0x10001000);
+    if (async_io_) block_device_->attach_async_engine(async_io_);
+    bus_->register_device(block_device_);
+    block_device_->start_worker();
+
+    if (config_.enable_nvme) {
+        nvme_ = std::make_shared<NVMeController>(active_disk_, memory_, 0x20000000);
+        if (async_io_) nvme_->attach_async_engine(async_io_);
+        bus_->register_device(nvme_);
+        if (pci_bus_ && !pci_bus_->attach_device(0, 4, 0, nvme_)) return false;
+    }
+    return true;
+}
+
 bool VirtualMachine::load_binary(const std::vector<uint8_t>& code, uint64_t load_addr) {
     if (!memory_) return false;
     entry_point_ = load_addr;
@@ -164,16 +181,11 @@ bool VirtualMachine::load_lime_image(const std::string& image_path) {
     in.read(reinterpret_cast<char*>(&hdr), sizeof(hdr));
     if (in.gcount() != sizeof(hdr)) return false;
 
-    if (hdr.magic[0] == 'L' && hdr.magic[1] == 'I' && hdr.magic[2] == 'M' && hdr.magic[3] == 'E') {
+    if (hdr.magic[0] != 'L' || hdr.magic[1] != 'I' || hdr.magic[2] != 'M' || hdr.magic[3] != 'E') return false;
+    if (active_disk_ && !config_.sparse_disk_path.empty() && config_.sparse_disk_path != image_path) return false;
+    if (!active_disk_) {
         config_.sparse_disk_path = image_path;
-        if (!disk_) {
-            disk_ = std::make_shared<SparseDisk>();
-        }
-        disk_->open(image_path);
-        if (!block_device_) {
-            block_device_ = std::make_shared<VirtIOBlockDevice>(disk_, memory_, 0x10001000);
-            bus_->register_device(block_device_);
-        }
+        if (!initialize_storage(image_path, config_.delta_disk_path)) return false;
     }
 
     std::vector<uint8_t> code = LimeImageBuilder::generate_mini_os_code();
@@ -254,8 +266,20 @@ void VirtualMachine::stop() {
     if (scheduler_) {
         scheduler_->stop();
     }
-    if (nvme_) {
-        nvme_->poll_async(1024);  // drain outstanding async block I/O
+    if (block_device_) block_device_->stop_worker();
+    if (net_device_) net_device_->stop_worker();
+    if (net_bridge_) net_bridge_->stop_bridge();
+    if (gpu_device_) gpu_device_->stop_display();
+    if (async_io_) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (async_io_->pending() != 0 && std::chrono::steady_clock::now() < deadline) {
+            if (async_io_->poll(128) == 0) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        if (async_io_->pending() != 0) {
+            std::cerr << "[LIME] Async I/O shutdown timed out with " << async_io_->pending()
+                      << " operation(s) still pending." << std::endl;
+        }
+        async_io_->shutdown();
     }
 }
 

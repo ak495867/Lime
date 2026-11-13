@@ -56,7 +56,6 @@ void CLI::print_usage() {
               << "  --cpu <count|auto>   vCPU count [default: auto]\n"
               << "  --policy <policy>    Allocation policy (aggressive|balanced|lazy) [default: balanced]\n"
               << "  --overlay <delta>    CoW delta overlay image\n"
-              << "  --hardware-vt        Enable native host hardware virtualization (WHPX/KVM)\n"
               << "  --net                Enable virtual VirtIO network & socket bridge\n"
               << "  --headless           Run without interactive graphics\n"
               << std::endl;
@@ -151,16 +150,15 @@ int CLI::handle_run(const std::vector<std::string>& args) {
     }
 
     if (vm.hypervisor() && vm.hypervisor()->is_active()) {
-        std::cout << "[LIME] Hardware Virtualization Engine Active (Host Native VT)." << std::endl;
+        std::cout << "[LIME] Host virtualization backend active." << std::endl;
     } else {
-        std::cout << "[LIME] Software Execution Engine Active (JIT / MMU Emulation)." << std::endl;
+        std::cout << "[LIME] Software emulator active." << std::endl;
     }
 
     std::cout << "[LIME] Loading guest OS image: " << image_path << "..." << std::endl;
     if (!vm.load_lime_image(image_path)) {
-        std::cout << "[LIME] Image load fallback: Injecting mini-OS kernel..." << std::endl;
-        std::vector<uint8_t> default_code = LimeImageBuilder::generate_mini_os_code();
-        vm.load_binary(default_code, 0x80000000);
+        std::cerr << "[LIME] Error: Could not load a valid guest disk image: " << image_path << std::endl;
+        return 1;
     }
 
     std::cout << "[LIME] Booting guest execution engine..." << std::endl;

@@ -14,7 +14,7 @@ CXXFLAGS="-std=c++20 -O2 -Iinclude -Ithird_party/asmjit -DASMJIT_STATIC"
 case "$(uname -s)" in
   MINGW*|MSYS*|CYGWIN*)
     BIN_SUFFIX=".exe"
-    LIBS="-lws2_32 -lWinHvPlatform -luser32 -lgdi32"
+    LIBS="-lws2_32 -luser32 -lgdi32"
     ;;
   *)
     BIN_SUFFIX=""

@@ -126,6 +126,7 @@ public:
         req->ovl.Offset = static_cast<DWORD>(offset & 0xFFFFFFFFULL);
         req->ovl.OffsetHigh = static_cast<DWORD>(offset >> 32);
 
+        pending_kernel_.fetch_add(1);
         BOOL ok;
         if (op == AsyncOpType::READ) {
             ok = ReadFile(file_, buffer, static_cast<DWORD>(bytes), nullptr, &req->ovl);
@@ -136,6 +137,7 @@ public:
         if (!ok) {
             DWORD err = GetLastError();
             if (err != ERROR_IO_PENDING) {
+                pending_kernel_.fetch_sub(1);
                 // Rejected synchronously: complete it through the queue so the
                 // "callbacks only fire from poll()" contract still holds.
                 AsyncCompletion c{op, req->id, false, 0, static_cast<int>(err)};
@@ -177,7 +179,7 @@ public:
 
 private:
     void worker_loop() {
-        while (!stop_.load()) {
+        while (!stop_.load() || pending_kernel_.load() != 0) {
             DWORD bytes = 0;
             ULONG_PTR key = 0;
             OVERLAPPED* ovl = nullptr;
@@ -193,12 +195,14 @@ private:
             c.error = c.success ? 0 : static_cast<int>(GetLastError());
 
             push_done(c, std::move(req->cb));
+            pending_kernel_.fetch_sub(1);
             delete req;
         }
     }
 
     std::mutex lifecycle_mutex_;
     std::atomic<bool> stop_{false};
+    std::atomic<size_t> pending_kernel_{0};
     HANDLE file_{INVALID_HANDLE_VALUE};
     HANDLE iocp_{nullptr};
     std::thread worker_;

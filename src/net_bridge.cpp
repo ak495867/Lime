@@ -41,6 +41,12 @@ bool HostNetBridge::start_bridge(uint16_t listen_port) {
     addr.sin_addr.s_addr = INADDR_ANY;
 
     if (::bind(sock_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
+#if defined(_WIN32)
+        closesocket(sock_);
+#else
+        close(static_cast<int>(sock_));
+#endif
+        sock_ = 0;
         return false;
     }
 
@@ -78,9 +84,10 @@ bool HostNetBridge::send_frame(const std::vector<uint8_t>& frame) {
     dest.sin_port = htons(port_ + 1);
     dest.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     
-    ::sendto(sock_, reinterpret_cast<const char*>(frame.data()), frame.size(), 0,
-             reinterpret_cast<sockaddr*>(&dest), sizeof(dest));
-    return true;
+    int sent = ::sendto(sock_, reinterpret_cast<const char*>(frame.data()),
+                        static_cast<int>(frame.size()), 0,
+                        reinterpret_cast<sockaddr*>(&dest), sizeof(dest));
+    return sent == static_cast<int>(frame.size());
 }
 
 std::vector<uint8_t> HostNetBridge::receive_frame() {

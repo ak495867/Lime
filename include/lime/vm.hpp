@@ -77,6 +77,7 @@ private:
     std::shared_ptr<MemoryManager> memory_;
     std::shared_ptr<SparseDisk> disk_;
     std::shared_ptr<CoWSparseDisk> cow_disk_;
+    std::shared_ptr<BlockStorage> active_disk_;
     std::shared_ptr<DeviceBus> bus_;
     std::shared_ptr<PCIBus> pci_bus_;
     std::vector<std::shared_ptr<VCPU>> vcpus_;
@@ -99,6 +100,8 @@ private:
     std::atomic<bool> running_{false};
     uint64_t entry_point_{0x80000000};
     std::vector<std::thread> vcpu_threads_;
+
+    bool initialize_storage(const std::string& base_path, const std::string& delta_path);
 };
 
 class LimeImageBuilder {

@@ -22,27 +22,18 @@ std::vector<uint8_t> FirmwareLoader::create_dummy_uefi_header() {
 
 bool FirmwareLoader::load_firmware(std::shared_ptr<MemoryManager> mem, const std::string& path, FirmwareType type, uint64_t target_gpa) {
     if (!mem) return false;
+    (void)type;
 
     std::ifstream file(path, std::ios::binary | std::ios::ate);
-    if (!file.is_open()) {
-        std::vector<uint8_t> dummy = create_dummy_uefi_header();
-        return mem->write_bytes(target_gpa, dummy.data(), dummy.size());
-    }
+    if (!file.is_open()) return false;
 
     std::streamsize size = file.tellg();
     file.seekg(0, std::ios::beg);
 
-    std::vector<uint8_t> buffer(size);
-    if (file.read(reinterpret_cast<char*>(buffer.data()), size)) {
-        if (type == FirmwareType::UEFI_OVMF && size > 2) {
-            if (buffer[0] != 'M' || buffer[1] != 'Z') {
-                buffer[0] = 'M';
-                buffer[1] = 'Z';
-            }
-        }
-        return mem->write_bytes(target_gpa, buffer.data(), buffer.size());
-    }
-    return false;
+    if (size <= 0) return false;
+    std::vector<uint8_t> buffer(static_cast<size_t>(size));
+    return file.read(reinterpret_cast<char*>(buffer.data()), size) &&
+           mem->write_bytes(target_gpa, buffer.data(), buffer.size());
 }
 
 bool FirmwareLoader::load_ovmf_split(std::shared_ptr<MemoryManager> mem, const std::string& code_path, const std::string& vars_path, uint64_t code_gpa, uint64_t vars_gpa) {
@@ -53,21 +44,19 @@ bool FirmwareLoader::load_ovmf_split(std::shared_ptr<MemoryManager> mem, const s
         std::streamsize size = code_file.tellg();
         code_file.seekg(0, std::ios::beg);
         std::vector<uint8_t> buffer(size);
-        if (code_file.read(reinterpret_cast<char*>(buffer.data()), size)) {
-            mem->write_bytes(code_gpa, buffer.data(), buffer.size());
-        }
-    }
+        if (size <= 0 || !code_file.read(reinterpret_cast<char*>(buffer.data()), size) ||
+            !mem->write_bytes(code_gpa, buffer.data(), buffer.size())) return false;
+    } else return false;
     
     std::ifstream vars_file(vars_path, std::ios::binary | std::ios::ate);
     if (vars_file.is_open()) {
         std::streamsize size = vars_file.tellg();
         vars_file.seekg(0, std::ios::beg);
         std::vector<uint8_t> buffer(size);
-        if (vars_file.read(reinterpret_cast<char*>(buffer.data()), size)) {
-            mem->write_bytes(vars_gpa, buffer.data(), buffer.size());
-        }
-    }
-    
+        if (size <= 0 || !vars_file.read(reinterpret_cast<char*>(buffer.data()), size) ||
+            !mem->write_bytes(vars_gpa, buffer.data(), buffer.size())) return false;
+    } else return false;
+
     return true;
 }
 
@@ -79,8 +68,8 @@ bool FirmwareLoader::load_linux_kernel(std::shared_ptr<MemoryManager> mem, const
     std::streamsize ksize = kern.tellg();
     kern.seekg(0, std::ios::beg);
     std::vector<uint8_t> kbuf(ksize);
-    kern.read(reinterpret_cast<char*>(kbuf.data()), ksize);
-    mem->write_bytes(kernel_gpa, kbuf.data(), kbuf.size());
+    if (ksize <= 0 || !kern.read(reinterpret_cast<char*>(kbuf.data()), ksize) ||
+        !mem->write_bytes(kernel_gpa, kbuf.data(), kbuf.size())) return false;
     
     if (out_entry) {
         *out_entry = kernel_gpa;
@@ -100,11 +89,11 @@ bool FirmwareLoader::load_linux_kernel(std::shared_ptr<MemoryManager> mem, const
             initrd_size = initrd.tellg();
             initrd.seekg(0, std::ios::beg);
             std::vector<uint8_t> ibuf(initrd_size);
-            initrd.read(reinterpret_cast<char*>(ibuf.data()), initrd_size);
             initrd_gpa = kernel_gpa + ksize + 0x100000;
             initrd_gpa = (initrd_gpa + 0xFFF) & ~0xFFFULL;
-            mem->write_bytes(initrd_gpa, ibuf.data(), ibuf.size());
-        }
+            if (initrd_size == 0 || !initrd.read(reinterpret_cast<char*>(ibuf.data()), initrd_size) ||
+                !mem->write_bytes(initrd_gpa, ibuf.data(), ibuf.size())) return false;
+        } else return false;
     }
     
     uint64_t fdt_gpa = (initrd_gpa > 0) ? (initrd_gpa + initrd_size + 0x10000) : (kernel_gpa + ksize + 0x10000);
@@ -118,8 +107,7 @@ bool FirmwareLoader::generate_fdt(std::shared_ptr<MemoryManager> mem, uint64_t f
     dtb[0] = 0xd0; dtb[1] = 0x0d; dtb[2] = 0xfe; dtb[3] = 0xed;
     dtb[4] = 0x00; dtb[5] = 0x00; dtb[6] = 0x10; dtb[7] = 0x00;
     
-    mem->write_bytes(fdt_gpa, dtb.data(), dtb.size());
-    return true;
+    return mem->write_bytes(fdt_gpa, dtb.data(), dtb.size());
 }
 
 }

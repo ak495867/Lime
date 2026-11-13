@@ -10,11 +10,8 @@ MemoryManager::MemoryManager(size_t total_ram_bytes, size_t page_size)
 }
 
 uint8_t* MemoryManager::ensure_page(uint64_t page_index, bool is_write) {
-    // Guest physical addresses are bounded by the configured RAM size. Keep
-    // out-of-range accesses from silently allocating arbitrary host memory.
-    if (page_index >= total_pages_) {
-        return nullptr;
-    }
+    // Guest address spaces are sparse and include regions above zero (for
+    // example RAM at 0x80000000). total_pages_ limits committed pages below.
     if (pages_.size() >= total_pages_ && pages_.find(page_index) == pages_.end()) {
         return nullptr;
     }

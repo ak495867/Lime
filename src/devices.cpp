@@ -75,7 +75,7 @@ std::string UartConsoleDevice::get_output_buffer() {
     return res;
 }
 
-VirtIOBlockDevice::VirtIOBlockDevice(std::shared_ptr<SparseDisk> disk, std::shared_ptr<MemoryManager> mem, uint64_t base_addr)
+VirtIOBlockDevice::VirtIOBlockDevice(std::shared_ptr<BlockStorage> disk, std::shared_ptr<MemoryManager> mem, uint64_t base_addr)
     : disk_(disk), mem_(mem), base_addr_(base_addr) {}
 
 VirtIOBlockDevice::~VirtIOBlockDevice() {
@@ -86,13 +86,15 @@ void VirtIOBlockDevice::start_worker() {
     if (worker_running_.load()) return;
     worker_running_ = true;
     worker_thread_ = std::thread([this]() {
-        while (worker_running_.load()) {
+        while (true) {
             std::unique_lock<std::mutex> lock(req_mutex_);
             cv_.wait(lock, [this]() {
                 return !pending_requests_.empty() || !worker_running_.load();
             });
-            if (!worker_running_.load()) break;
-            if (pending_requests_.empty()) continue;
+            if (pending_requests_.empty()) {
+                if (!worker_running_.load()) break;
+                continue;
+            }
 
             AsyncRequest req = pending_requests_.front();
             pending_requests_.pop();
@@ -119,13 +121,13 @@ void VirtIOBlockDevice::stop_worker() {
 }
 
 void VirtIOBlockDevice::submit_async_read(uint64_t lba, uint32_t sector_count, void* buffer, std::function<void(bool)> callback) {
-    if (async_engine_ && async_engine_->is_open() && disk_) {
-        auto cb = std::move(callback);
-        submit_sparse_range(async_engine_, disk_, AsyncOpType::READ,
+    auto sparse_disk = std::dynamic_pointer_cast<SparseDisk>(disk_);
+    if (async_engine_ && async_engine_->is_open() && sparse_disk) {
+        auto cb = callback;
+        if (submit_sparse_range(async_engine_, sparse_disk, AsyncOpType::READ,
                             lba * SparseDisk::SECTOR_SIZE, buffer,
                             static_cast<size_t>(sector_count) * SparseDisk::SECTOR_SIZE,
-                            [cb](const AsyncCompletion& c) { if (cb) cb(c.success); });
-        return;
+                            [cb](const AsyncCompletion& c) { if (cb) cb(c.success); })) return;
     }
     std::lock_guard<std::mutex> lock(req_mutex_);
     pending_requests_.push({AsyncRequest::OpType::READ, lba, sector_count, buffer, callback});
@@ -133,13 +135,13 @@ void VirtIOBlockDevice::submit_async_read(uint64_t lba, uint32_t sector_count, v
 }
 
 void VirtIOBlockDevice::submit_async_write(uint64_t lba, uint32_t sector_count, const void* buffer, std::function<void(bool)> callback) {
-    if (async_engine_ && async_engine_->is_open() && disk_) {
-        auto cb = std::move(callback);
-        submit_sparse_range(async_engine_, disk_, AsyncOpType::WRITE,
+    auto sparse_disk = std::dynamic_pointer_cast<SparseDisk>(disk_);
+    if (async_engine_ && async_engine_->is_open() && sparse_disk) {
+        auto cb = callback;
+        if (submit_sparse_range(async_engine_, sparse_disk, AsyncOpType::WRITE,
                             lba * SparseDisk::SECTOR_SIZE, const_cast<void*>(buffer),
                             static_cast<size_t>(sector_count) * SparseDisk::SECTOR_SIZE,
-                            [cb](const AsyncCompletion& c) { if (cb) cb(c.success); });
-        return;
+                            [cb](const AsyncCompletion& c) { if (cb) cb(c.success); })) return;
     }
     std::lock_guard<std::mutex> lock(req_mutex_);
     pending_requests_.push({AsyncRequest::OpType::WRITE, lba, sector_count, const_cast<void*>(buffer), callback});
@@ -209,13 +211,15 @@ void VirtIONetDevice::start_worker() {
     if (worker_running_.load()) return;
     worker_running_ = true;
     worker_thread_ = std::thread([this]() {
-        while (worker_running_.load()) {
+        while (true) {
             std::unique_lock<std::mutex> lock(frame_mutex_);
             cv_.wait(lock, [this]() {
                 return !pending_frames_.empty() || !worker_running_.load();
             });
-            if (!worker_running_.load()) break;
-            if (pending_frames_.empty()) continue;
+            if (pending_frames_.empty()) {
+                if (!worker_running_.load()) break;
+                continue;
+            }
 
             AsyncFrame frame = pending_frames_.front();
             pending_frames_.pop();

@@ -6,7 +6,7 @@
 
 namespace lime {
 
-NVMeController::NVMeController(std::shared_ptr<SparseDisk> disk, std::shared_ptr<MemoryManager> mem, uint64_t base_addr)
+NVMeController::NVMeController(std::shared_ptr<BlockStorage> disk, std::shared_ptr<MemoryManager> mem, uint64_t base_addr)
     : PCIDevice(0x1B4B, 0x0108, 0x01, 0x08), disk_(disk), mem_(mem) {
     base_addr_ = base_addr;
 }
@@ -142,7 +142,8 @@ void NVMeController::process_io_sq() {
     // (invoked from poll_async/tick) copies data into guest memory and
     // posts the completion queue entry.
     // ------------------------------------------------------------------
-    if (async_engine_ && async_engine_->is_open() && (opcode == 0x01 || opcode == 0x02)) {
+    auto sparse_disk = std::dynamic_pointer_cast<SparseDisk>(disk_);
+    if (async_engine_ && async_engine_->is_open() && sparse_disk && (opcode == 0x01 || opcode == 0x02)) {
         bool is_read = (opcode == 0x02);
         auto staging = std::make_shared<std::vector<uint8_t>>(total_bytes, 0);
         if (!is_read) {
@@ -154,7 +155,7 @@ void NVMeController::process_io_sq() {
         uint64_t byte_offset = slba * 512ULL;
 
         bool submitted = submit_sparse_range(
-            async_engine_, disk_,
+            async_engine_, sparse_disk,
             is_read ? AsyncOpType::READ : AsyncOpType::WRITE,
             byte_offset, staging->data(), total_bytes,
             [mem, staging, cid, prp1, is_read, total_bytes, cq_base](const AsyncCompletion& c) {

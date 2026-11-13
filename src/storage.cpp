@@ -18,7 +18,8 @@ SparseDisk::~SparseDisk() {
 }
 
 bool SparseDisk::create(const std::string& path, uint64_t capacity_bytes, uint32_t block_size) {
-    if (capacity_bytes == 0 || block_size == 0) return false;
+    if (capacity_bytes == 0 || block_size == 0 ||
+        capacity_bytes % SECTOR_SIZE != 0 || block_size % SECTOR_SIZE != 0) return false;
     const uint64_t total_blocks = capacity_bytes / block_size + (capacity_bytes % block_size != 0);
     if (total_blocks > UINT32_MAX) return false;
     std::ofstream out(path, std::ios::binary | std::ios::trunc);
@@ -65,16 +66,49 @@ bool SparseDisk::open(const std::string& path) {
     }
 
     if (header_.version != 1 || header_.block_size == 0 ||
+        header_.block_size % SECTOR_SIZE != 0 ||
+        header_.virtual_capacity_bytes % SECTOR_SIZE != 0 ||
         header_.total_blocks == 0 ||
+        header_.allocated_blocks > header_.total_blocks ||
         (header_.virtual_capacity_bytes / header_.block_size +
          (header_.virtual_capacity_bytes % header_.block_size != 0)) != header_.total_blocks) {
         close();
         return false;
     }
 
+    file_.seekg(0, std::ios::end);
+    const std::streamoff physical_size = file_.tellg();
+    const uint64_t table_end = sizeof(LimeSparseDiskHeader) +
+                               static_cast<uint64_t>(header_.total_blocks) * sizeof(uint32_t);
+    if (physical_size < 0 || static_cast<uint64_t>(physical_size) < table_end) {
+        close();
+        return false;
+    }
+
     block_table_.resize(header_.total_blocks);
+    file_.clear();
+    file_.seekg(sizeof(LimeSparseDiskHeader), std::ios::beg);
     file_.read(reinterpret_cast<char*>(block_table_.data()), header_.total_blocks * sizeof(uint32_t));
     if (file_.gcount() != static_cast<std::streamsize>(header_.total_blocks * sizeof(uint32_t))) {
+        close();
+        return false;
+    }
+
+    std::vector<bool> seen(header_.allocated_blocks, false);
+    uint32_t mapped_blocks = 0;
+    for (uint32_t file_block : block_table_) {
+        if (file_block == 0xFFFFFFFF) continue;
+        if (file_block >= header_.allocated_blocks || seen[file_block]) {
+            close();
+            return false;
+        }
+        seen[file_block] = true;
+        ++mapped_blocks;
+    }
+    const uint64_t data_bytes = static_cast<uint64_t>(header_.allocated_blocks) * header_.block_size;
+    if (mapped_blocks != header_.allocated_blocks ||
+        data_bytes > UINT64_MAX - table_end ||
+        static_cast<uint64_t>(physical_size) < table_end + data_bytes) {
         close();
         return false;
     }

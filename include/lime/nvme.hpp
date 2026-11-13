@@ -29,7 +29,7 @@ struct NVMeControllerRegs {
 
 class NVMeController : public PCIDevice {
 public:
-    explicit NVMeController(std::shared_ptr<SparseDisk> disk, std::shared_ptr<MemoryManager> mem, uint64_t base_addr = 0x20000000);
+    explicit NVMeController(std::shared_ptr<BlockStorage> disk, std::shared_ptr<MemoryManager> mem, uint64_t base_addr = 0x20000000);
     ~NVMeController() override = default;
 
     std::string name() const override { return "NVMe-Controller"; }
@@ -52,7 +52,7 @@ public:
     std::shared_ptr<AsyncIOEngine> async_engine() const { return async_engine_; }
 
 private:
-    std::shared_ptr<SparseDisk> disk_;
+    std::shared_ptr<BlockStorage> disk_;
     std::shared_ptr<MemoryManager> mem_;
     NVMeControllerRegs regs_;
     uint32_t admin_sq_head_{0};

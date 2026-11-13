@@ -23,7 +23,7 @@ public:
     uint32_t read(uint64_t offset, size_t size) override;
     void write(uint64_t offset, uint32_t value, size_t size) override;
 
-    void tick();  
+    void tick() override;
 
     uint64_t get_counter() const { return counter_; }
 

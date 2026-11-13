@@ -7,7 +7,7 @@
 
 namespace lime {
 
-class CoWSparseDisk {
+class CoWSparseDisk : public BlockStorage {
 public:
     CoWSparseDisk() = default;
     ~CoWSparseDisk() = default;
@@ -17,13 +17,13 @@ public:
     bool open(const std::string& base_path, const std::string& delta_path);
     void close();
 
-    bool read_sectors(uint64_t lba, uint32_t sector_count, void* buffer);
-    bool write_sectors(uint64_t lba, uint32_t sector_count, const void* buffer);
+    bool read_sectors(uint64_t lba, uint32_t sector_count, void* buffer) override;
+    bool write_sectors(uint64_t lba, uint32_t sector_count, const void* buffer) override;
 
-    uint64_t capacity_bytes() const;
+    uint64_t capacity_bytes() const override;
     uint64_t delta_host_file_size() const;
     uint32_t delta_allocated_blocks() const;
-    bool is_open() const;
+    bool is_open() const override;
 
 private:
     std::shared_ptr<SparseDisk> base_disk_;

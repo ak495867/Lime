@@ -4,37 +4,21 @@
 
 # LIME: Lightweight Userspace Virtual Machine Runtime
 
-LIME is a high-performance, lightweight C++ virtual machine and hardware abstraction layer designed to execute miniature operating systems, micro-kernels, security sandboxes, and embedded workloads inside a host OS while consuming dramatically fewer resources than traditional hypervisors like QEMU.
+LIME is an experimental C++20 virtual machine emulator. It currently provides a RISC-V interpreter with an optional x86-64 host-code JIT, a separate partial x86 software decoder, guest memory and MMIO devices, and sparse disk images. It is not yet a production hypervisor or a general-purpose operating-system boot environment.
 
-The defining principle of LIME is **dynamic compute allocation**: give the virtual machine exactly what it needs, when it needs it, and aggressively reclaim host resources the moment the guest goes idle.
+The project focuses on making the emulated machine small and inspectable. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for implemented behavior and current limits.
 
 ---
 
 ## Key Features
 
-- **Dynamic Compute & Memory Allocation:**
-  - **Demand Paging:** Guest RAM is allocated only when physical pages are touched for the first time.
-  - **Memory Ballooning:** Guest or host policy can inflate/deflate memory balloon pages.
-  - **Idle Page Reclamation:** Background worker trims untouched RAM pages back to the host system.
-  - **Zero-Footprint Idle Sleep:** vCPU `WFI` (Wait For Interrupt) detection dynamically sleeps host threads to reduce background CPU usage to near 0%.
+- **Execution:** RISC-V interpreter and an optional AsmJit-based x86-64 host-code JIT for selected RISC-V operations. x86 guest decoding is a separate partial software implementation.
+- **Memory:** Sparse page allocation with a commitment limit, a basic balloon device, and Sv39 translation code. Dirty guest pages are not reclaimed because there is no swap backing store yet.
 
-- **Sparse Virtual Storage (`.lime` Format):**
-  - High-performance 64 KB block allocation map. A guest configured with a 100 MB virtual drive consumes ~70 KB on physical host storage until write operations occur.
-  - **Copy-On-Write (CoW) Delta Overlay:** Instant 0-cost VM disk cloning by chaining read-only base images with read-write overlay layers.
+- **Storage:** `.lime` sparse images with 64 KiB blocks and CoW overlays. VirtIO block and the simplified NVMe device share a sector-storage interface; CoW performs block copy-up on first write. Async file I/O currently applies only to sparse base images.
 
-- **Universal Hardware & Device Subsystems:**
-  - **MMU Paging:** Sv39 3-level page table translation (`VPN2`, `VPN1`, `VPN0`) for Virtual Address to Guest Physical Address mapping.
-  - **Interrupt Controllers:** Core Local Interruptor (**CLINT**) for hardware timer ticks and Platform-Level Interrupt Controller (**PLIC**) for external IRQs.
-  - **PCI Express Bus (ECAM):** 256-bus configuration space (`0xE0000000`) supporting dynamic device probing.
-  - **VirtIO Device Modules:** VirtIO-Block, VirtIO-Net (with host socket bridge), VirtIO-Balloon, VirtIO-GPU, and 16550 UART Serial Console.
-  - **NVMe Controller Subsystem:** PCI Express mass storage driver with Admin and I/O submission queues.
-  - **ACPI Table Engine:** Generates RSDP, XSDT, and MADT (APIC) tables for Linux and OS kernel booting.
-  - **Firmware Loader:** Maps UEFI (OVMF) or SeaBIOS ROM images into guest high memory.
-
-- **Multi-Architecture Execution Engine:**
-  - RISC-V 64-bit / 32-bit execution target with full privilege levels (Machine, Supervisor, User).
-  - x86_64 target execution engine supporting Real Mode (16-bit), Protected Mode (32-bit), and Long Mode (64-bit).
-  - Pluggable Host Native Virtualization abstraction (WHPX on Windows, KVM on Linux).
+- **Devices:** Basic UART, VirtIO-style MMIO devices, CLINT/PLIC, PCI ECAM, and simplified NVMe are implemented to varying levels. Device queue handling and guest OS compatibility are incomplete.
+- **Host virtualization:** WHPX/KVM execution is not implemented. `--hardware-vt` is rejected rather than silently falling back.
 
 ---
 
@@ -53,30 +37,13 @@ irm https://github.com/ak495867/Lime/raw/main/install.ps1 | iex
 ```
 *(This script will download `lime.exe` and configure your PATH so you can run `lime` directly from any command prompt).*
 
-### 2. Manual Compilation from Source
+### 2. Build from Source
 
-LIME requires a standard C++20 compiler (`g++`, `clang++`, or MSVC).
+Use a C++20 compiler and Bash. The build script compiles the vendored AsmJit sources, then builds both the CLI and test executable:
 
-**Compiling LIME CLI Executable:**
-```powershell
-g++ -std=c++20 -Iinclude \
-    src/memory.cpp src/storage.cpp src/cow_disk.cpp src/devices.cpp \
-    src/interrupts.cpp src/mmu.cpp src/hypervisor.cpp src/net_bridge.cpp \
-    src/jit.cpp src/acpi.cpp src/pci.cpp src/firmware.cpp src/nvme.cpp \
-    src/x86_cpu.cpp src/vcpu.cpp src/scheduler.cpp src/vm.cpp src/cli.cpp src/main.cpp \
-    -o lime.exe -lws2_32 -lWinHvPlatform -luser32 -lgdi32
-```
-
-**Compiling Test Suite:**
-```powershell
-g++ -std=c++20 -Iinclude \
-    src/memory.cpp src/storage.cpp src/cow_disk.cpp src/devices.cpp \
-    src/interrupts.cpp src/mmu.cpp src/hypervisor.cpp src/net_bridge.cpp \
-    src/jit.cpp src/acpi.cpp src/pci.cpp src/firmware.cpp src/nvme.cpp \
-    src/x86_cpu.cpp src/vcpu.cpp src/scheduler.cpp src/vm.cpp tests/test_lime.cpp \
-    -o test_lime.exe -lws2_32 -lWinHvPlatform -luser32 -lgdi32
-
-.\test_lime.exe
+```bash
+bash build.sh
+./test_lime       # Windows: ./test_lime.exe
 ```
 
 ---
@@ -115,11 +82,7 @@ Boot a guest image with 256 MB RAM under aggressive resource reclamation policy:
 lime run image.lime --ram 256M --cpu auto --policy aggressive --net
 ```
 
-Boot with native host hardware virtualization enabled:
-
-```bash
-lime run image.lime --ram 512M --hardware-vt
-```
+The current CLI runs the software emulator. Firmware and kernel-loading support is experimental; image validation and configured file loading failures are reported.
 
 ---
 
