@@ -25,6 +25,7 @@
 #include <fstream>
 #include <vector>
 #include <string>
+#include <cstring>
 #include <filesystem>
 
 void test_memory_subsystem() {

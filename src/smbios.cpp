@@ -14,7 +14,7 @@ uint8_t SMBIOSTables::compute_checksum(const uint8_t* data, size_t length) {
 std::vector<uint8_t> SMBIOSTables::create_bios_info() {
 
     SMBIOSHeader header = {0, 0x1F, 0x0000};
-    std::vector<uint8_t> bios_info(sizeof(SMBIOSHeader) + 0x1D);
+    std::vector<uint8_t> bios_info(256, 0);
     std::memcpy(bios_info.data(), &header, sizeof(SMBIOSHeader));
 
     std::string vendor = "LimeVM";
@@ -53,7 +53,7 @@ std::vector<uint8_t> SMBIOSTables::create_bios_info() {
 std::vector<uint8_t> SMBIOSTables::create_system_info() {
 
     SMBIOSHeader header = {1, 0x19, 0x0000};
-    std::vector<uint8_t> system_info(sizeof(SMBIOSHeader) + 0x17);
+    std::vector<uint8_t> system_info(256, 0);
     std::memcpy(system_info.data(), &header, sizeof(SMBIOSHeader));
 
     std::string manufacturer = "LimeVM";
@@ -94,7 +94,7 @@ std::vector<uint8_t> SMBIOSTables::create_system_info() {
 std::vector<uint8_t> SMBIOSTables::create_processor_info(uint32_t cpu_count) {
 
     SMBIOSHeader header = {4, 0x2A, 0x0000};
-    std::vector<uint8_t> processor_info(sizeof(SMBIOSHeader) + 0x28);
+    std::vector<uint8_t> processor_info(256, 0);
     std::memcpy(processor_info.data(), &header, sizeof(SMBIOSHeader));
 
     processor_info[0x08] = 0x01;
