@@ -153,6 +153,9 @@ public:
     void start_worker();
     void stop_worker();
     void send_frame_async(const std::vector<uint8_t>& frame, std::function<void(bool)> callback = nullptr);
+    void receive_frame(const std::vector<uint8_t>& frame);
+    void set_tx_handler(std::function<void(const std::vector<uint8_t>&)> handler);
+    std::vector<uint8_t> pop_rx_frame();
 
     uint64_t packets_sent() const { return packets_sent_; }
     uint64_t packets_recv() const { return packets_recv_; }
@@ -171,6 +174,8 @@ private:
     };
 
     std::queue<AsyncFrame> pending_frames_;
+    std::queue<std::vector<uint8_t>> rx_frames_;
+    std::function<void(const std::vector<uint8_t>&)> tx_handler_;
     std::mutex frame_mutex_;
     std::thread worker_thread_;
     std::atomic<bool> worker_running_{false};

@@ -17,6 +17,7 @@ private:
     static int handle_inspect(const std::vector<std::string>& args);
     static int handle_stats(const std::vector<std::string>& args);
     static int handle_overlay(const std::vector<std::string>& args);
+    static int handle_snapshot(const std::vector<std::string>& args);
     static size_t parse_size(const std::string& str);
 };
 

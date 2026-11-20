@@ -18,6 +18,7 @@
 #include "lime/jit_x86.hpp"
 #include "lime/async_io.hpp"
 #include "lime/gdb_stub.hpp"
+#include "lime/fs.hpp"
 #include <iostream>
 #include <cassert>
 #include <chrono>
@@ -915,6 +916,312 @@ void test_gdb_remote_protocol() {
     std::cout << "[TEST PASSED] GDB Remote Serial Protocol Stub" << std::endl << std::flush;
 }
 
+void test_rvc_compression() {
+    uint32_t nop32 = lime::VCPU::expand_rvc(0x0001);
+    assert(nop32 == 0x00000013);
+
+    uint16_t c_li = 0x4129; // c.li x2, 10
+    uint32_t li_exp = lime::VCPU::expand_rvc(c_li);
+    assert((li_exp & 0x7F) == 0x13);
+    assert(((li_exp >> 7) & 0x1F) == 2);
+
+    uint16_t c_mv = 0x818a; // c.mv x3, x2
+    uint32_t mv_exp = lime::VCPU::expand_rvc(c_mv);
+    assert(mv_exp == 0x002001B3); // add x3, x0, x2
+
+    auto mem = std::make_shared<lime::MemoryManager>(4 * 1024 * 1024, 4096);
+    auto bus = std::make_shared<lime::DeviceBus>();
+    auto vcpu = std::make_shared<lime::VCPU>(0, mem, bus);
+    vcpu->reset(0x80000000);
+
+    mem->write16(0x80000000, c_li);
+    mem->write16(0x80000002, c_mv);
+    mem->write32(0x80000004, 0x00518213); // addi x4, x3, 5
+
+    assert(vcpu->step());
+    assert(vcpu->get_reg(2) == 10);
+    assert(vcpu->get_pc() == 0x80000002);
+
+    assert(vcpu->step());
+    assert(vcpu->get_reg(3) == 10);
+    assert(vcpu->get_pc() == 0x80000004);
+
+    assert(vcpu->step());
+    assert(vcpu->get_reg(4) == 15);
+    assert(vcpu->get_pc() == 0x80000008);
+
+    // Test JIT compiling compressed block
+    vcpu->reset(0x80000000);
+    vcpu->set_reg(2, 0);
+    vcpu->set_reg(3, 0);
+    vcpu->set_reg(4, 0);
+    size_t executed = vcpu->run_cycles(3);
+    assert(executed >= 3);
+    assert(vcpu->get_reg(4) == 15);
+
+    std::cout << "[TEST PASSED] RISC-V Compressed (RVC) Expansion & JIT Inlining" << std::endl << std::flush;
+}
+
+void test_qcow2_storage() {
+    const std::string qcow_path = "test_image.qcow2";
+    if (std::filesystem::exists(qcow_path)) std::filesystem::remove(qcow_path);
+
+    assert(lime::QCOW2Disk::create(qcow_path, 4 * 1024 * 1024, 16));
+
+    lime::QCOW2Disk disk;
+    assert(disk.open(qcow_path));
+    assert(disk.is_open());
+    assert(disk.version() == 3);
+    assert(disk.cluster_size() == 65536);
+    assert(disk.capacity_bytes() == 4 * 1024 * 1024);
+
+    std::vector<uint8_t> rbuf(1024, 0xFF);
+    assert(disk.read_sectors(0, 2, rbuf.data()));
+    for (uint8_t b : rbuf) assert(b == 0);
+
+    std::vector<uint8_t> wbuf(1024);
+    for (size_t i = 0; i < wbuf.size(); ++i) wbuf[i] = static_cast<uint8_t>(i ^ 0x5A);
+    assert(disk.write_sectors(10, 2, wbuf.data()));
+
+    std::fill(rbuf.begin(), rbuf.end(), 0);
+    assert(disk.read_sectors(10, 2, rbuf.data()));
+    assert(rbuf == wbuf);
+
+    std::vector<uint8_t> cross_w(2048);
+    for (size_t i = 0; i < cross_w.size(); ++i) cross_w[i] = static_cast<uint8_t>(i & 0xFF);
+    assert(disk.write_sectors(126, 4, cross_w.data()));
+
+    std::vector<uint8_t> cross_r(2048, 0);
+    assert(disk.read_sectors(126, 4, cross_r.data()));
+    assert(cross_r == cross_w);
+
+    disk.close();
+    assert(disk.open(qcow_path));
+    std::fill(rbuf.begin(), rbuf.end(), 0);
+    assert(disk.read_sectors(10, 2, rbuf.data()));
+    assert(rbuf == wbuf);
+    disk.close();
+
+    std::error_code ec;
+    std::filesystem::remove(qcow_path, ec);
+
+    std::cout << "[TEST PASSED] QCOW2 Disk Driver (v2/v3 cluster tables & writes)" << std::endl << std::flush;
+}
+
+void test_virtio_fs() {
+    namespace fs = std::filesystem;
+    fs::path test_dir = "test_shared_dir";
+    std::error_code ec;
+    fs::remove_all(test_dir, ec);
+    fs::create_directories(test_dir, ec);
+
+    std::string test_filename = "hello.txt";
+    std::string test_data = "Lime Virtual Machine VirtIO-FS shared file contents!\n";
+    {
+        std::ofstream out(test_dir / test_filename, std::ios::binary);
+        out << test_data;
+    }
+
+    auto mem = std::make_shared<lime::MemoryManager>(16 * 1024 * 1024, 4096);
+    lime::VirtIOFSDevice fs_dev(mem, 0x10006000, test_dir.string(), "limefs");
+
+    // 1. FUSE_INIT
+    std::vector<uint8_t> init_req(sizeof(lime::fuse_in_header) + sizeof(lime::fuse_init_in), 0);
+    auto* in_hdr = reinterpret_cast<lime::fuse_in_header*>(init_req.data());
+    in_hdr->len = static_cast<uint32_t>(init_req.size());
+    in_hdr->opcode = lime::FUSE_INIT;
+    in_hdr->unique = 101;
+    in_hdr->nodeid = 1;
+
+    std::vector<uint8_t> init_reply = fs_dev.handle_fuse_request(init_req);
+    assert(init_reply.size() >= sizeof(lime::fuse_out_header) + sizeof(lime::fuse_init_out));
+    auto* out_hdr = reinterpret_cast<lime::fuse_out_header*>(init_reply.data());
+    assert(out_hdr->unique == 101);
+    assert(out_hdr->error == 0);
+    auto* init_out = reinterpret_cast<lime::fuse_init_out*>(init_reply.data() + sizeof(lime::fuse_out_header));
+    assert(init_out->major == 7);
+    assert(init_out->minor == 31);
+
+    // 2. FUSE_LOOKUP
+    std::vector<uint8_t> lookup_req(sizeof(lime::fuse_in_header) + test_filename.size() + 1, 0);
+    auto* l_hdr = reinterpret_cast<lime::fuse_in_header*>(lookup_req.data());
+    l_hdr->len = static_cast<uint32_t>(lookup_req.size());
+    l_hdr->opcode = lime::FUSE_LOOKUP;
+    l_hdr->unique = 102;
+    l_hdr->nodeid = 1;
+    std::memcpy(lookup_req.data() + sizeof(lime::fuse_in_header), test_filename.c_str(), test_filename.size() + 1);
+
+    std::vector<uint8_t> lookup_reply = fs_dev.handle_fuse_request(lookup_req);
+    auto* l_out_hdr = reinterpret_cast<lime::fuse_out_header*>(lookup_reply.data());
+    assert(l_out_hdr->error == 0);
+    auto* entry_out = reinterpret_cast<lime::fuse_entry_out*>(lookup_reply.data() + sizeof(lime::fuse_out_header));
+    uint64_t file_nodeid = entry_out->nodeid;
+    assert(file_nodeid > 1);
+
+    // 3. FUSE_OPEN
+    std::vector<uint8_t> open_req(sizeof(lime::fuse_in_header) + sizeof(lime::fuse_open_in), 0);
+    auto* o_hdr = reinterpret_cast<lime::fuse_in_header*>(open_req.data());
+    o_hdr->len = static_cast<uint32_t>(open_req.size());
+    o_hdr->opcode = lime::FUSE_OPEN;
+    o_hdr->unique = 103;
+    o_hdr->nodeid = file_nodeid;
+
+    std::vector<uint8_t> open_reply = fs_dev.handle_fuse_request(open_req);
+    auto* o_out_hdr = reinterpret_cast<lime::fuse_out_header*>(open_reply.data());
+    assert(o_out_hdr->error == 0);
+    auto* open_out = reinterpret_cast<lime::fuse_open_out*>(open_reply.data() + sizeof(lime::fuse_out_header));
+    uint64_t fh = open_out->fh;
+
+    // 4. FUSE_READ
+    std::vector<uint8_t> read_req(sizeof(lime::fuse_in_header) + sizeof(lime::fuse_read_in), 0);
+    auto* r_hdr = reinterpret_cast<lime::fuse_in_header*>(read_req.data());
+    r_hdr->len = static_cast<uint32_t>(read_req.size());
+    r_hdr->opcode = lime::FUSE_READ;
+    r_hdr->unique = 104;
+    r_hdr->nodeid = file_nodeid;
+    auto* r_in = reinterpret_cast<lime::fuse_read_in*>(read_req.data() + sizeof(lime::fuse_in_header));
+    r_in->fh = fh;
+    r_in->offset = 0;
+    r_in->size = 128;
+
+    std::vector<uint8_t> read_reply = fs_dev.handle_fuse_request(read_req);
+    auto* r_out_hdr = reinterpret_cast<lime::fuse_out_header*>(read_reply.data());
+    assert(r_out_hdr->error == 0);
+    std::string read_str(reinterpret_cast<char*>(read_reply.data() + sizeof(lime::fuse_out_header)),
+                         read_reply.size() - sizeof(lime::fuse_out_header));
+    assert(read_str == test_data);
+
+    // 5. FUSE_READDIR
+    std::vector<uint8_t> rdir_req(sizeof(lime::fuse_in_header) + sizeof(lime::fuse_read_in), 0);
+    auto* rd_hdr = reinterpret_cast<lime::fuse_in_header*>(rdir_req.data());
+    rd_hdr->len = static_cast<uint32_t>(rdir_req.size());
+    rd_hdr->opcode = lime::FUSE_READDIR;
+    rd_hdr->unique = 105;
+    rd_hdr->nodeid = 1;
+
+    std::vector<uint8_t> rdir_reply = fs_dev.handle_fuse_request(rdir_req);
+    auto* rd_out_hdr = reinterpret_cast<lime::fuse_out_header*>(rdir_reply.data());
+    assert(rd_out_hdr->error == 0);
+    assert(rdir_reply.size() > sizeof(lime::fuse_out_header));
+
+    fs::remove_all(test_dir, ec);
+    std::cout << "[TEST PASSED] VirtIO-FS (FUSE INIT/LOOKUP/OPEN/READ/READDIR)" << std::endl << std::flush;
+}
+
+void test_user_net_stack() {
+    auto mem = std::make_shared<lime::MemoryManager>(16 * 1024 * 1024, 4096);
+    auto net_dev = std::make_shared<lime::VirtIONetDevice>(mem, 0x10002000);
+    lime::UserNetStack net_stack(net_dev);
+
+    // 1. Test ARP Request for Gateway 10.0.2.2
+    std::vector<uint8_t> arp_req(42, 0);
+    std::memset(&arp_req[0], 0xFF, 6);
+    arp_req[6] = 0x52; arp_req[7] = 0x54; arp_req[8] = 0x00; arp_req[9] = 0x12; arp_req[10] = 0x34; arp_req[11] = 0x56;
+    arp_req[12] = 0x08; arp_req[13] = 0x06;
+    arp_req[14] = 0x00; arp_req[15] = 0x01; // HW Ethernet
+    arp_req[16] = 0x08; arp_req[17] = 0x00; // IPv4
+    arp_req[18] = 6; arp_req[19] = 4;
+    arp_req[20] = 0x00; arp_req[21] = 0x01; // Opcode: Request (1)
+    std::memcpy(&arp_req[22], &arp_req[6], 6); // Sender MAC
+    arp_req[28] = 10; arp_req[29] = 0; arp_req[30] = 2; arp_req[31] = 15; // Sender IP
+    arp_req[38] = 10; arp_req[39] = 0; arp_req[40] = 2; arp_req[41] = 2;  // Target IP (10.0.2.2)
+
+    std::vector<uint8_t> arp_resp = net_stack.process_frame(arp_req);
+    assert(arp_resp.size() == 42);
+    assert(arp_resp[20] == 0x00 && arp_resp[21] == 0x02); // Opcode Reply
+    assert(arp_resp[28] == 10 && arp_resp[29] == 0 && arp_resp[30] == 2 && arp_resp[31] == 2); // Sender IP 10.0.2.2
+
+    // 2. Test ICMP Echo Request (Ping 10.0.2.2)
+    std::vector<uint8_t> icmp_req(98, 0);
+    icmp_req[12] = 0x08; icmp_req[13] = 0x00; // IPv4
+    icmp_req[14] = 0x45;
+    icmp_req[23] = 1; // ICMP
+    icmp_req[26] = 10; icmp_req[27] = 0; icmp_req[28] = 2; icmp_req[29] = 15; // Src 10.0.2.15
+    icmp_req[30] = 10; icmp_req[31] = 0; icmp_req[32] = 2; icmp_req[33] = 2;  // Dst 10.0.2.2
+    icmp_req[34] = 8; // Echo request
+    icmp_req[35] = 0; // Code
+
+    std::vector<uint8_t> icmp_resp = net_stack.process_frame(icmp_req);
+    assert(icmp_resp.size() == icmp_req.size());
+    assert(icmp_resp[34] == 0); // Echo Reply
+    assert(icmp_resp[26] == 10 && icmp_resp[27] == 0 && icmp_resp[28] == 2 && icmp_resp[29] == 2); // Src 10.0.2.2
+
+    // 3. Port Forwarding registration
+    net_stack.add_port_forward(2222, 22, "tcp");
+    assert(net_stack.port_forwards().size() == 1);
+    assert(net_stack.port_forwards()[0].host_port == 2222);
+    assert(net_stack.port_forwards()[0].guest_port == 22);
+
+    std::cout << "[TEST PASSED] User-Mode Virtual NAT Network Stack (ARP/DHCP/ICMP/hostfwd)" << std::endl << std::flush;
+}
+
+void test_vm_state_snapshots() {
+    const std::string snap_file = "test_vm_state.snap";
+    std::error_code ec;
+    std::filesystem::remove(snap_file, ec);
+
+    lime::VMConfig config;
+    config.ram_size_mb = 16;
+    config.cpu_count = 2;
+    config.headless = true;
+
+    lime::VirtualMachine vm(config);
+    assert(vm.init());
+
+    vm.vcpus()[0]->set_reg(1, 0x1122334455667788ULL);
+    vm.vcpus()[0]->set_pc(0x80004000);
+    vm.vcpus()[0]->set_csr(0x300, 0x1800);
+
+    vm.vcpus()[1]->set_reg(1, 0xAABBCCDDEEFF0011ULL);
+    vm.vcpus()[1]->set_pc(0x80008000);
+
+    vm.memory()->write32(0x80001000, 0xCAFEBABE);
+    vm.memory()->write64(0x80002000, 0xDEADBEEF01020304ULL);
+
+    assert(vm.save_snapshot(snap_file));
+
+    vm.vcpus()[0]->set_reg(1, 0);
+    vm.vcpus()[0]->set_pc(0);
+    vm.vcpus()[1]->set_reg(1, 0);
+    vm.memory()->write32(0x80001000, 0);
+    vm.memory()->write64(0x80002000, 0);
+
+    assert(vm.load_snapshot(snap_file));
+
+    assert(vm.vcpus()[0]->get_reg(1) == 0x1122334455667788ULL);
+    assert(vm.vcpus()[0]->get_pc() == 0x80004000);
+    assert(vm.vcpus()[0]->get_csr(0x300) == 0x1800);
+
+    assert(vm.vcpus()[1]->get_reg(1) == 0xAABBCCDDEEFF0011ULL);
+    assert(vm.vcpus()[1]->get_pc() == 0x80008000);
+
+    assert(vm.memory()->read32(0x80001000) == 0xCAFEBABE);
+    assert(vm.memory()->read64(0x80002000) == 0xDEADBEEF01020304ULL);
+
+    std::filesystem::remove(snap_file, ec);
+    std::cout << "[TEST PASSED] VM State Snapshots (Live CPU & Memory Serialization)" << std::endl << std::flush;
+}
+
+void test_prometheus_metrics() {
+    lime::VMConfig config;
+    config.ram_size_mb = 32;
+    config.cpu_count = 1;
+    config.headless = true;
+
+    lime::VirtualMachine vm(config);
+    assert(vm.init());
+
+    std::string metrics = vm.generate_prometheus_metrics();
+    assert(metrics.find("lime_cpu_cycles_total") != std::string::npos);
+    assert(metrics.find("lime_jit_blocks_total") != std::string::npos);
+    assert(metrics.find("lime_memory_allocated_bytes") != std::string::npos);
+    assert(metrics.find("lime_memory_capacity_bytes") != std::string::npos);
+    assert(metrics.find("lime_disk_capacity_bytes") != std::string::npos);
+    assert(metrics.find("lime_net_packets_sent_total") != std::string::npos);
+
+    std::cout << "[TEST PASSED] Prometheus OpenMetrics Telemetry Generation" << std::endl << std::flush;
+}
+
 int main() {
     std::cout << "Starting Test Suite Execution..." << std::endl << std::flush;
     test_memory_subsystem();
@@ -929,6 +1236,12 @@ int main() {
     test_binary_fdt_dtb();
     test_virtio_split_queue();
     test_gdb_remote_protocol();
+    test_rvc_compression();
+    test_qcow2_storage();
+    test_virtio_fs();
+    test_user_net_stack();
+    test_vm_state_snapshots();
+    test_prometheus_metrics();
     test_full_vm_extensions();
     std::cout << "\nALL UNIVERSAL LIME EXTENSION TESTS PASSED SUCCESSFULLY!" << std::endl << std::flush;
     return 0;

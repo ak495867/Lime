@@ -45,6 +45,10 @@ public:
     uint64_t fault_count() const;
     size_t page_size() const;
 
+    void dump_allocated_pages(std::vector<std::pair<uint64_t, std::vector<uint8_t>>>& out) const;
+    void restore_page(uint64_t page_index, const std::vector<uint8_t>& data);
+    void clear_all_pages();
+
 private:
     uint8_t* ensure_page(uint64_t page_index, bool is_write);
 

@@ -150,16 +150,27 @@ bool VCPU::step() {
 
     uint64_t curr_pc = pc_;
     bool fault = false;
-    uint32_t inst = fetch32(curr_pc, fault);
+    uint32_t raw = fetch32(curr_pc, fault);
     if (fault) {
         trigger_interrupt(12);
         return true;
     }
 
+    if ((raw & 0x3) != 0x3) {
+        uint16_t c_inst = static_cast<uint16_t>(raw & 0xFFFF);
+        uint32_t exp = expand_rvc(c_inst);
+        curr_inst_len_ = 2;
+        pc_ += 2;
+        total_cycles_++;
+        execute_instruction(exp);
+        return state_.load() == VCPUState::RUNNING;
+    }
+
+    curr_inst_len_ = 4;
     pc_ += 4;
     total_cycles_++;
 
-    execute_instruction(inst);
+    execute_instruction(raw);
     return state_.load() == VCPUState::RUNNING;
 }
 
@@ -180,14 +191,26 @@ size_t VCPU::run_cycles(size_t max_cycles) {
         bool fault = false;
         
         std::vector<uint32_t> block_insts;
+        std::vector<uint8_t> block_lens;
         uint64_t scan_pc = curr_pc;
-        for (int i=0; i<16; ++i) {
+        for (int i = 0; i < 16; ++i) {
             uint32_t inst = fetch32(scan_pc, fault);
             if (fault) break;
-            block_insts.push_back(inst);
-            scan_pc += 4;
-            uint32_t op = inst & 0x7F;
-            if (op == 0x6F || op == 0x67 || op == 0x63 || op == 0x73) break;
+            if ((inst & 0x3) != 0x3) {
+                uint16_t c_inst = static_cast<uint16_t>(inst & 0xFFFF);
+                uint32_t exp = expand_rvc(c_inst);
+                block_insts.push_back(exp);
+                block_lens.push_back(2);
+                scan_pc += 2;
+                uint32_t op = exp & 0x7F;
+                if (op == 0x6F || op == 0x67 || op == 0x63 || op == 0x73) break;
+            } else {
+                block_insts.push_back(inst);
+                block_lens.push_back(4);
+                scan_pc += 4;
+                uint32_t op = inst & 0x7F;
+                if (op == 0x6F || op == 0x67 || op == 0x63 || op == 0x73) break;
+            }
         }
         
         if (block_insts.empty()) {
@@ -195,7 +218,7 @@ size_t VCPU::run_cycles(size_t max_cycles) {
             break;
         }
 
-        const BasicBlock* bb = jit_->lookup_or_compile(curr_pc, block_insts);
+        const BasicBlock* bb = jit_->lookup_or_compile(curr_pc, block_insts, block_lens);
         if (bb) {
             // Prefer the asmjit-native machine-code block; fall back to the
             // threaded-code / interpreter path when the backend is absent or
@@ -240,11 +263,13 @@ void VCPU::execute_instruction(uint32_t inst) {
 
     uint64_t satp = get_csr(0x180);
 
-
     if ((inst & 0x3) != 0x3) {
-        execute_compressed(static_cast<uint16_t>(inst & 0xFFFF));
+        uint32_t exp = expand_rvc(static_cast<uint16_t>(inst & 0xFFFF));
+        if (exp != 0) execute_instruction(exp);
         return;
     }
+
+    const uint64_t inst_base_pc = pc_ - curr_inst_len_;
 
     switch (opcode) {
     case 0x37:
@@ -252,12 +277,12 @@ void VCPU::execute_instruction(uint32_t inst) {
         break;
 
     case 0x17:
-        set_reg(rd, (pc_ - 4) + static_cast<uint64_t>(imm_u));
+        set_reg(rd, inst_base_pc + static_cast<uint64_t>(imm_u));
         break;
 
     case 0x6F:
         set_reg(rd, pc_);
-        pc_ = (pc_ - 4) + imm_j;
+        pc_ = inst_base_pc + imm_j;
         break;
 
     case 0x67: {
@@ -280,7 +305,7 @@ void VCPU::execute_instruction(uint32_t inst) {
         case 7: take = (val1 >= val2); break;
         }
         if (take) {
-            pc_ = (pc_ - 4) + imm_b;
+            pc_ = inst_base_pc + imm_b;
         }
         break;
     }
@@ -560,177 +585,242 @@ void VCPU::execute_sc(uint32_t rd, uint32_t rs1, uint32_t rs2, uint32_t funct3) 
     }
 }
 
+uint32_t VCPU::expand_rvc(uint16_t c) {
+    if ((c & 0x3) == 0x3) return c;
+
+    uint32_t op = c & 0x03;
+    uint32_t funct3 = (c >> 13) & 0x07;
+    uint32_t rd_prime = 8 + ((c >> 2) & 0x07);
+    uint32_t rs1_prime = 8 + ((c >> 7) & 0x07);
+    uint32_t rs2_prime = 8 + ((c >> 2) & 0x07);
+    uint32_t rd = (c >> 7) & 0x1F;
+    uint32_t rs2 = (c >> 2) & 0x1F;
+
+    auto encode_i = [](uint32_t opcode, uint32_t rd, uint32_t funct3, uint32_t rs1, int32_t imm) -> uint32_t {
+        return ((static_cast<uint32_t>(imm) & 0xFFF) << 20) | (rs1 << 15) | ((funct3 & 7) << 12) | (rd << 7) | (opcode & 0x7F);
+    };
+    auto encode_r = [](uint32_t opcode, uint32_t rd, uint32_t funct3, uint32_t rs1, uint32_t rs2, uint32_t funct7) -> uint32_t {
+        return ((funct7 & 0x7F) << 25) | (rs2 << 20) | (rs1 << 15) | ((funct3 & 7) << 12) | (rd << 7) | (opcode & 0x7F);
+    };
+    auto encode_s = [](uint32_t opcode, uint32_t funct3, uint32_t rs1, uint32_t rs2, int32_t imm) -> uint32_t {
+        return (((static_cast<uint32_t>(imm) >> 5) & 0x7F) << 25) | (rs2 << 20) | (rs1 << 15) | ((funct3 & 7) << 12) | ((static_cast<uint32_t>(imm) & 0x1F) << 7) | (opcode & 0x7F);
+    };
+    auto encode_b = [](uint32_t opcode, uint32_t funct3, uint32_t rs1, uint32_t rs2, int32_t imm) -> uint32_t {
+        uint32_t u = static_cast<uint32_t>(imm);
+        uint32_t bit12 = (u >> 12) & 1;
+        uint32_t bit10_5 = (u >> 5) & 0x3F;
+        uint32_t bit4_1 = (u >> 1) & 0xF;
+        uint32_t bit11 = (u >> 11) & 1;
+        return (bit12 << 31) | (bit10_5 << 25) | (rs2 << 20) | (rs1 << 15) | ((funct3 & 7) << 12) | (bit4_1 << 8) | (bit11 << 7) | (opcode & 0x7F);
+    };
+    auto encode_u = [](uint32_t opcode, uint32_t rd, int32_t imm) -> uint32_t {
+        return (static_cast<uint32_t>(imm) & 0xFFFFF000u) | (rd << 7) | (opcode & 0x7F);
+    };
+    auto encode_j = [](uint32_t opcode, uint32_t rd, int32_t imm) -> uint32_t {
+        uint32_t u = static_cast<uint32_t>(imm);
+        uint32_t bit20 = (u >> 20) & 1;
+        uint32_t bit10_1 = (u >> 1) & 0x3FF;
+        uint32_t bit11 = (u >> 11) & 1;
+        uint32_t bit19_12 = (u >> 12) & 0xFF;
+        return (bit20 << 31) | (bit10_1 << 21) | (bit11 << 20) | (bit19_12 << 12) | (rd << 7) | (opcode & 0x7F);
+    };
+
+    switch (op) {
+    case 0: { // Quadrant 0
+        switch (funct3) {
+        case 0: { // c.addi4spn
+            uint32_t nzuimm = (((c >> 11) & 0x3) << 4) |
+                              (((c >> 7) & 0xF) << 6) |
+                              (((c >> 6) & 0x1) << 2) |
+                              (((c >> 5) & 0x1) << 3);
+            if (nzuimm == 0) return 0;
+            return encode_i(0x13, rd_prime, 0, 2, static_cast<int32_t>(nzuimm));
+        }
+        case 2: { // c.lw
+            uint32_t uimm = (((c >> 5) & 0x1) << 6) |
+                            (((c >> 10) & 0x7) << 3) |
+                            (((c >> 6) & 0x1) << 2);
+            return encode_i(0x03, rd_prime, 2, rs1_prime, static_cast<int32_t>(uimm));
+        }
+        case 3: { // c.ld (RV64)
+            uint32_t uimm = (((c >> 5) & 0x3) << 6) |
+                            (((c >> 10) & 0x7) << 3);
+            return encode_i(0x03, rd_prime, 3, rs1_prime, static_cast<int32_t>(uimm));
+        }
+        case 6: { // c.sw
+            uint32_t uimm = (((c >> 5) & 0x1) << 6) |
+                            (((c >> 10) & 0x7) << 3) |
+                            (((c >> 6) & 0x1) << 2);
+            return encode_s(0x23, 2, rs1_prime, rs2_prime, static_cast<int32_t>(uimm));
+        }
+        case 7: { // c.sd (RV64)
+            uint32_t uimm = (((c >> 5) & 0x3) << 6) |
+                            (((c >> 10) & 0x7) << 3);
+            return encode_s(0x23, 3, rs1_prime, rs2_prime, static_cast<int32_t>(uimm));
+        }
+        default: return 0;
+        }
+    }
+    case 1: { // Quadrant 1
+        switch (funct3) {
+        case 0: { // c.addi / c.nop
+            int32_t imm = ((c >> 2) & 0x1F) | ((c & 0x1000) ? ~0x1F : 0);
+            return encode_i(0x13, rd, 0, rd, imm);
+        }
+        case 1: { // c.addiw (RV64)
+            if (rd == 0) return 0;
+            int32_t imm = ((c >> 2) & 0x1F) | ((c & 0x1000) ? ~0x1F : 0);
+            return encode_i(0x1B, rd, 0, rd, imm);
+        }
+        case 2: { // c.li
+            if (rd == 0) return 0;
+            int32_t imm = ((c >> 2) & 0x1F) | ((c & 0x1000) ? ~0x1F : 0);
+            return encode_i(0x13, rd, 0, 0, imm);
+        }
+        case 3: { // c.addi16sp (rd=2) / c.lui (rd!=2,0)
+            if (rd == 2) {
+                int32_t imm = (((c >> 12) & 1) ? ~0x1FF : 0) |
+                              (((c >> 12) & 1) << 9) |
+                              (((c >> 3) & 3) << 7) |
+                              (((c >> 5) & 1) << 6) |
+                              (((c >> 2) & 1) << 5) |
+                              (((c >> 6) & 1) << 4);
+                if (imm == 0) return 0;
+                return encode_i(0x13, 2, 0, 2, imm);
+            } else if (rd != 0) {
+                int32_t imm = (((c >> 12) & 1) ? ~0x1FFFF : 0) |
+                              (((c >> 12) & 1) << 17) |
+                              (((c >> 2) & 0x1F) << 12);
+                if (imm == 0) return 0;
+                return encode_u(0x37, rd, imm);
+            }
+            return 0;
+        }
+        case 4: {
+            uint32_t sub_op = (c >> 10) & 0x3;
+            if (sub_op == 0) { // c.srli
+                uint32_t shamt = (((c >> 12) & 1) << 5) | ((c >> 2) & 0x1F);
+                return encode_i(0x13, rd_prime, 5, rd_prime, static_cast<int32_t>(shamt));
+            } else if (sub_op == 1) { // c.srai
+                uint32_t shamt = (((c >> 12) & 1) << 5) | ((c >> 2) & 0x1F);
+                return encode_i(0x13, rd_prime, 5, rd_prime, static_cast<int32_t>(shamt | 0x400));
+            } else if (sub_op == 2) { // c.andi
+                int32_t imm = ((c >> 2) & 0x1F) | ((c & 0x1000) ? ~0x1F : 0);
+                return encode_i(0x13, rd_prime, 7, rd_prime, imm);
+            } else {
+                uint32_t sub_funct = (c >> 5) & 0x3;
+                uint32_t bit12 = (c >> 12) & 1;
+                if (bit12 == 0) {
+                    switch (sub_funct) {
+                    case 0: return encode_r(0x33, rd_prime, 0, rd_prime, rs2_prime, 0x20); // c.sub
+                    case 1: return encode_r(0x33, rd_prime, 4, rd_prime, rs2_prime, 0x00); // c.xor
+                    case 2: return encode_r(0x33, rd_prime, 6, rd_prime, rs2_prime, 0x00); // c.or
+                    case 3: return encode_r(0x33, rd_prime, 7, rd_prime, rs2_prime, 0x00); // c.and
+                    }
+                } else {
+                    switch (sub_funct) {
+                    case 0: return encode_r(0x3B, rd_prime, 0, rd_prime, rs2_prime, 0x20); // c.subw
+                    case 1: return encode_r(0x3B, rd_prime, 0, rd_prime, rs2_prime, 0x00); // c.addw
+                    default: return 0;
+                    }
+                }
+            }
+            return 0;
+        }
+        case 5: { // c.j
+            int32_t offset = (((c >> 12) & 1) ? ~0x7FF : 0) |
+                             (((c >> 12) & 1) << 11) |
+                             (((c >> 8) & 1) << 10) |
+                             (((c >> 9) & 3) << 8) |
+                             (((c >> 6) & 1) << 7) |
+                             (((c >> 7) & 1) << 6) |
+                             (((c >> 2) & 1) << 5) |
+                             (((c >> 11) & 1) << 4) |
+                             (((c >> 3) & 7) << 1);
+            return encode_j(0x6F, 0, offset);
+        }
+        case 6: { // c.beqz
+            int32_t offset = (((c >> 12) & 1) ? ~0xFF : 0) |
+                             (((c >> 12) & 1) << 8) |
+                             (((c >> 5) & 3) << 6) |
+                             (((c >> 2) & 1) << 5) |
+                             (((c >> 10) & 3) << 3) |
+                             (((c >> 3) & 3) << 1);
+            return encode_b(0x63, 0, rs1_prime, 0, offset);
+        }
+        case 7: { // c.bnez
+            int32_t offset = (((c >> 12) & 1) ? ~0xFF : 0) |
+                             (((c >> 12) & 1) << 8) |
+                             (((c >> 5) & 3) << 6) |
+                             (((c >> 2) & 1) << 5) |
+                             (((c >> 10) & 3) << 3) |
+                             (((c >> 3) & 3) << 1);
+            return encode_b(0x63, 1, rs1_prime, 0, offset);
+        }
+        default: return 0;
+        }
+    }
+    case 2: { // Quadrant 2
+        switch (funct3) {
+        case 0: { // c.slli
+            if (rd == 0) return 0;
+            uint32_t shamt = (((c >> 12) & 1) << 5) | ((c >> 2) & 0x1F);
+            return encode_i(0x13, rd, 1, rd, static_cast<int32_t>(shamt));
+        }
+        case 2: { // c.lwsp
+            if (rd == 0) return 0;
+            uint32_t offset = (((c >> 2) & 3) << 6) | (((c >> 12) & 1) << 5) | (((c >> 4) & 7) << 2);
+            return encode_i(0x03, rd, 2, 2, static_cast<int32_t>(offset));
+        }
+        case 3: { // c.ldsp (RV64)
+            if (rd == 0) return 0;
+            uint32_t offset = (((c >> 2) & 7) << 6) | (((c >> 12) & 1) << 5) | (((c >> 5) & 3) << 3);
+            return encode_i(0x03, rd, 3, 2, static_cast<int32_t>(offset));
+        }
+        case 4: {
+            uint32_t bit12 = (c >> 12) & 1;
+            if (bit12 == 0) {
+                if (rs2 == 0) {
+                    if (rd == 0) return 0;
+                    return encode_i(0x67, 0, 0, rd, 0); // c.jr
+                } else {
+                    if (rd == 0) return 0;
+                    return encode_r(0x33, rd, 0, 0, rs2, 0); // c.mv
+                }
+            } else {
+                if (rd == 0 && rs2 == 0) {
+                    return 0x00100073; // c.ebreak
+                } else if (rs2 == 0) {
+                    if (rd == 0) return 0;
+                    return encode_i(0x67, 1, 0, rd, 0); // c.jalr
+                } else {
+                    if (rd == 0) return 0;
+                    return encode_r(0x33, rd, 0, rd, rs2, 0); // c.add
+                }
+            }
+        }
+        case 6: { // c.swsp
+            uint32_t offset = (((c >> 7) & 3) << 6) | (((c >> 9) & 0xF) << 2);
+            return encode_s(0x23, 2, 2, rs2, static_cast<int32_t>(offset));
+        }
+        case 7: { // c.sdsp (RV64)
+            uint32_t offset = (((c >> 7) & 7) << 6) | (((c >> 10) & 7) << 3);
+            return encode_s(0x23, 3, 2, rs2, static_cast<int32_t>(offset));
+        }
+        default: return 0;
+        }
+    }
+    default: return 0;
+    }
+}
+
 bool VCPU::execute_compressed(uint16_t inst) {
-    uint32_t opcode = (inst >> 13) & 0x07;
-    uint32_t rd_prime = (inst >> 7) & 0x07;
-    uint32_t rs1_prime = (inst >> 7) & 0x07;
-    uint32_t rs2_prime = (inst >> 2) & 0x07;
-
-    switch (opcode) {
-    case 0b000: {  
-        uint32_t imm3 = (inst >> 4) & 0x07;
-        uint32_t imm2 = (inst >> 6) & 0x01;
-        uint32_t imm1 = (inst >> 5) & 0x01;
-        uint32_t imm6 = (inst >> 11) & 0x01;
-        int32_t nzimm = (imm6 << 5) | (imm3 << 2) | (imm2 << 1) | imm1;
-        if (rd_prime == 0) break;  
-        int32_t rd = rd_prime + (rd_prime < 2 ? 8 : 0);
-        int32_t rs1 = rs1_prime + (rs1_prime < 2 ? 8 : 0);
-        if (rd == 2 && rs1 == 2) {
-
-            if (nzimm == 0) break;
-            set_reg(rd, get_reg(2) + static_cast<uint64_t>(nzimm));
-        } else {
-            set_reg(rd, get_reg(rs1) + static_cast<uint64_t>(nzimm));
-        }
-        break;
-    }
-    case 0b001: {  
-        uint32_t imm5 = (inst >> 5) & 0x01;
-        uint32_t imm4 = (inst >> 10) & 0x01;
-        uint32_t imm6 = (inst >> 6) & 0x01;
-        int32_t offset = (imm6 << 5) | (imm5 << 4) | (imm4 << 3) | ((inst >> 7) & 0x07);
-        if (offset & 0x40) offset |= ~0x7F;  
-        uint64_t addr = get_reg(rs1_prime + 8) + static_cast<uint64_t>(offset);
-        bool fault = false;
-        uint64_t pa = mmu_->translate(addr, AccessType::READ, mode_, get_csr(0x180), fault);
-        if (!fault) {
-            set_reg(rd_prime + 8, mem_->read32(pa));
-        }
-        break;
-    }
-    case 0b100: {  
-        uint32_t funct2 = (inst >> 10) & 0x03;
-        if (funct2 == 0b00 || funct2 == 0b01) {  
-            uint32_t imm5 = (inst >> 5) & 0x01;
-            uint32_t imm4 = (inst >> 6) & 0x01;
-            uint32_t imm6 = (inst >> 10) & 0x01;
-            int32_t offset = (imm6 << 5) | (imm5 << 4) | (imm4 << 3) | ((inst >> 7) & 0x07);
-            if (offset & 0x40) offset |= ~0x7F;
-            uint32_t rs2 = rs2_prime + 8;
-            uint64_t addr = get_reg(rs1_prime + 8) + static_cast<uint64_t>(offset);
-            bool fault = false;
-            uint64_t pa = mmu_->translate(addr, AccessType::WRITE, mode_, get_csr(0x180), fault);
-            if (!fault) {
-                mem_->write32(pa, static_cast<uint32_t>(get_reg(rs2)));
-            }
-        } else if (funct2 == 0b10 || funct2 == 0b11) {  
-            uint32_t bimm4 = (inst >> 6) & 0x01;
-            uint32_t bimm3 = (inst >> 5) & 0x01;
-            uint32_t bimm6 = (inst >> 10) & 0x01;
-            uint32_t bimm5 = (inst >> 11) & 0x01;
-            int32_t boffset = (bimm6 << 5) | (bimm4 << 4) | (bimm3 << 3) | (bimm5 << 2) | ((inst >> 7) & 0x03);
-            if (boffset & 0x20) boffset |= ~0x3F;  
-            uint64_t rs1_val = get_reg(rs1_prime + 8);
-            bool take = (funct2 == 0b10) ? (rs1_val == 0) : (rs1_val != 0);
-            if (take) {
-                pc_ = (pc_ - 2) + static_cast<uint64_t>(boffset);
-            }
-        }
-        break;
-    }
-    case 0b101: {  
-        uint32_t imm12 = (inst >> 12) & 0x01;
-        uint32_t imm11 = (inst >> 11) & 0x01;
-        uint32_t imm4 = (inst >> 4) & 0x01;
-        uint32_t imm9 = (inst >> 3) & 0x01;
-        uint32_t imm8 = (inst >> 10) & 0x01;
-        uint32_t imm7 = (inst >> 9) & 0x01;
-        uint32_t imm6 = (inst >> 8) & 0x01;
-        uint32_t imm5 = (inst >> 7) & 0x01;
-        int32_t imm = (imm12 << 11) | (imm11 << 10) | (imm4 << 9) | (imm9 << 8) |
-                      (imm8 << 7) | (imm7 << 6) | (imm6 << 5) | (imm5 << 4) |
-                      ((inst >> 6) & 0x01) << 3 | ((inst >> 10) & 0x01) << 2 |
-                      ((inst >> 5) & 0x01) << 1 | ((inst >> 1) & 0x01);
-        if (imm & 0x800) imm |= ~0xFFF;  
-        if (opcode == 0b101 && rd_prime == 1) {  
-            set_reg(1, pc_ + 2);
-        }
-        pc_ = (pc_ - 2) + static_cast<uint64_t>(imm);
-        break;
-    }
-    case 0b110: {  
-        int32_t imm5 = static_cast<int32_t>(inst) >> 12;
-        uint32_t funct2 = (inst >> 10) & 0x03;
-        if (rd_prime == 0) {  
-            break;
-        }
-        uint32_t rd = rd_prime + (rd_prime < 2 ? 8 : 0);
-        if (funct2 == 0b00) {  
-            int32_t nzimm = ((inst >> 12) & 0x01) ? ((inst >> 12) | ~0x1F) : ((inst >> 12) & 0x1F);
-            nzimm = (nzimm & 0x10) ? (nzimm | ~0x1F) : nzimm;  
-            if (rd == 2 && rs1_prime == 2) {
-
-                uint32_t nzimm16sp = ((inst >> 12) & 0x01) << 5 | ((inst >> 6) & 0x01) << 4 |
-                                     ((inst >> 5) & 0x01) << 3 | ((inst >> 3) & 0x01) << 2 |
-                                     ((inst >> 4) & 0x01) << 1 | ((inst >> 2) & 0x01);
-                if (nzimm16sp & 0x20) nzimm16sp |= ~0x3F;
-                set_reg(rd, get_reg(2) + static_cast<uint64_t>(nzimm16sp));
-            } else {
-                set_reg(rd, get_reg(rd) + static_cast<uint64_t>(imm5));
-            }
-        } else if (funct2 == 0b10) {  
-            uint32_t shamt = ((inst >> 11) & 0x01) << 5 | ((inst >> 7) & 0x1F);
-            uint32_t rs2 = rs2_prime + 8;
-            if ((inst >> 12) & 0x01) {
-                set_reg(rd, static_cast<uint64_t>(static_cast<int64_t>(get_reg(rs2)) >> shamt));
-            } else {
-                set_reg(rd, get_reg(rs2) >> shamt);
-            }
-        } else if (funct2 == 0b11) {  
-            uint32_t rs2 = rs2_prime + 8;
-            int32_t simm5 = ((inst >> 12) & 0x01) ? ((inst >> 12) | ~0x1F) : ((inst >> 12) & 0x1F);
-            set_reg(rd, get_reg(rs2) & static_cast<uint64_t>(simm5));
-        } else if (funct2 == 0b01) {  
-            uint32_t rs2 = rs2_prime + 8;
-            uint32_t funct3_c = (inst >> 10) & 0x03;
-            switch (funct3_c) {
-            case 0b00: set_reg(rd, get_reg(rd) - get_reg(rs2)); break;  
-            case 0b01: set_reg(rd, get_reg(rd) ^ get_reg(rs2)); break;  
-            case 0b10: set_reg(rd, get_reg(rd) | get_reg(rs2)); break;  
-            case 0b11: set_reg(rd, get_reg(rd) & get_reg(rs2)); break;  
-            }
-        }
-        break;
-    }
-    case 0b111: {  
-        uint32_t funct3_c = (inst >> 10) & 0x03;
-        uint32_t rs1 = rs1_prime + 8;
-        uint32_t rs2 = rs2_prime + 8;
-        switch (funct3_c) {
-        case 0b00: set_reg(rs1_prime + 8, get_reg(rs1) - get_reg(rs2)); break;
-        case 0b01: set_reg(rs1_prime + 8, get_reg(rs1) ^ get_reg(rs2)); break;
-        case 0b10: set_reg(rs1_prime + 8, get_reg(rs1) | get_reg(rs2)); break;
-        case 0b11: set_reg(rs1_prime + 8, get_reg(rs1) & get_reg(rs2)); break;
-        }
-        break;
-    }
-    case 0b1000: {  
-        uint32_t funct3_c = (inst >> 12) & 0x07;
-        if (funct3_c == 0b000 && rs2_prime == 0) {  
-            pc_ = get_reg(rs1_prime + 8);
-        } else if (funct3_c == 0b000) {  
-            set_reg(rd_prime + 8, get_reg(rs2_prime + 8));
-        } else if (funct3_c == 0b001 && rs2_prime == 0) {  
-            uint64_t ra = get_reg(1);
-            pc_ = get_reg(rs1_prime + 8);
-            set_reg(1, pc_ + 2);
-        } else if (funct3_c == 0b001) {  
-            set_reg(rd_prime + 8, get_reg(rd_prime + 8) + get_reg(rs2_prime + 8));
-        }
-        break;
-    }
-    case 0b1001: {  
-        if (rd_prime == 0 && rs1_prime == 0 && rs2_prime == 0) {
-            state_ = VCPUState::HALTED;
-        }
-        break;
-    }
-    default:
-        break;
-    }
-
-    pc_ += 2;  
+    uint32_t exp = expand_rvc(inst);
+    if (exp == 0) return false;
+    uint8_t old_len = curr_inst_len_;
+    curr_inst_len_ = 2;
+    execute_instruction(exp);
+    curr_inst_len_ = old_len;
     return true;
 }
 
@@ -739,7 +829,8 @@ bool VCPU::execute_block_fast(const BasicBlock* bb, size_t& executed) {
     // Portable path for compilers without GCC computed-goto extensions.
     for (const MicroOp& op : bb->ops) {
         uint64_t inst_pc = pc_;
-        pc_ += 4;
+        curr_inst_len_ = op.len;
+        pc_ += op.len;
         execute_instruction(op.raw_inst);
         executed++;
         if (state_.load() != VCPUState::RUNNING) return false;
@@ -767,21 +858,24 @@ bool VCPU::execute_block_fast(const BasicBlock* bb, size_t& executed) {
     goto *dispatch_table[op->opcode];
 
 OP_LUI:
-    pc_ += 4;
+    curr_inst_len_ = op->len;
+    pc_ += op->len;
     if (op->rd != 0) regs_[op->rd] = static_cast<int64_t>(op->imm & 0xFFFFF000);
     op++; executed++;
     if (op == end) return true;
     goto *dispatch_table[op->opcode];
 
 OP_AUIPC:
+    curr_inst_len_ = op->len;
     if (op->rd != 0) regs_[op->rd] = pc_ + static_cast<int64_t>(op->imm & 0xFFFFF000);
-    pc_ += 4;
+    pc_ += op->len;
     op++; executed++;
     if (op == end) return true;
     goto *dispatch_table[op->opcode];
 
 OP_ALUI: {
-    pc_ += 4;
+    curr_inst_len_ = op->len;
+    pc_ += op->len;
     uint64_t val1 = get_reg(op->rs1);
     uint32_t funct3 = (op->raw_inst >> 12) & 0x7;
     uint64_t res = 0;
@@ -790,7 +884,7 @@ OP_ALUI: {
         case 4: res = val1 ^ op->imm; break;
         case 6: res = val1 | op->imm; break;
         case 7: res = val1 & op->imm; break;
-        default: execute_instruction(op->raw_inst); pc_-=4; res = get_reg(op->rd); break;
+        default: execute_instruction(op->raw_inst); pc_ -= op->len; res = get_reg(op->rd); break;
     }
     if (op->rd != 0) regs_[op->rd] = res;
     op++; executed++;
@@ -799,9 +893,10 @@ OP_ALUI: {
 }
 
 OP_ALUR:
-    pc_ += 4;
+    curr_inst_len_ = op->len;
+    pc_ += op->len;
     execute_instruction(op->raw_inst);
-    pc_-=4; 
+    pc_ -= op->len; 
     op++; executed++;
     if (op == end || state_.load() != VCPUState::RUNNING) return state_.load() == VCPUState::RUNNING;
     goto *dispatch_table[op->opcode];
@@ -809,9 +904,10 @@ OP_ALUR:
 OP_LOAD:
 OP_STORE:
 OP_FALLBACK:
-    pc_ += 4;
+    curr_inst_len_ = op->len;
+    pc_ += op->len;
     execute_instruction(op->raw_inst);
-    pc_-=4; 
+    pc_ -= op->len; 
     op++; executed++;
     if (op == end || state_.load() != VCPUState::RUNNING) return state_.load() == VCPUState::RUNNING;
     goto *dispatch_table[op->opcode];

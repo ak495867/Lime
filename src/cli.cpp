@@ -89,6 +89,8 @@ int CLI::run(int argc, char** argv) {
         return handle_stats(args);
     } else if (command == "overlay") {
         return handle_overlay(args);
+    } else if (command == "snapshot") {
+        return handle_snapshot(args);
     } else if (command == "help" || command == "--help" || command == "-h") {
         print_usage();
         return 0;
@@ -106,6 +108,7 @@ void CLI::print_usage() {
               << "  run <image>          Boot virtual machine image\n"
               << "  build <image>        Build miniature OS sparse image\n"
               << "  overlay <base> <delta> Create Copy-On-Write delta disk layer\n"
+              << "  snapshot <save|restore> <image> <file> Save or restore VM snapshot state\n"
               << "  inspect <image>      Inspect virtual disk structure\n"
               << "  stats <image>        Display resource allocation metrics\n"
               << "  help                 Display help information\n\n"
@@ -121,6 +124,12 @@ void CLI::print_usage() {
               << "  --gdb <port>         Listen for GDB remote debugging connections\n"
               << "  --hardware-vt        Attempt host hardware hypervisor acceleration\n"
               << "  --net                Enable virtual VirtIO network & socket bridge\n"
+              << "  --net-user           Enable user-mode NAT network stack (DHCP/Gateway/DNS)\n"
+              << "  --hostfwd <hp:gp>    Forward host TCP port to guest port (e.g. 2222:22)\n"
+              << "  --fs <host_path>     Share host directory via VirtIO-FS\n"
+              << "  --fs-tag <tag>       VirtIO-FS mount tag [default: limefs]\n"
+              << "  --metrics-port <p>   Expose Prometheus /metrics endpoint\n"
+              << "  --dashboard          Display terminal status dashboard\n"
               << "  --headless           Run without interactive graphics\n"
               << std::endl;
 }
@@ -195,6 +204,29 @@ int CLI::handle_run(const std::vector<std::string>& args) {
             config.use_hardware_hypervisor = true;
         } else if (args[i] == "--net") {
             config.enable_net = true;
+        } else if (args[i] == "--net-user") {
+            config.enable_net = true;
+            config.enable_user_net = true;
+        } else if (args[i] == "--hostfwd" && i + 1 < args.size()) {
+            std::string fwd = args[i + 1];
+            auto colon = fwd.find(':');
+            if (colon != std::string::npos) {
+                uint16_t hp = static_cast<uint16_t>(std::stoul(fwd.substr(0, colon)));
+                uint16_t gp = static_cast<uint16_t>(std::stoul(fwd.substr(colon + 1)));
+                config.hostfwd.emplace_back(hp, gp);
+            }
+            i++;
+        } else if (args[i] == "--fs" && i + 1 < args.size()) {
+            config.fs_host_path = args[i + 1];
+            i++;
+        } else if (args[i] == "--fs-tag" && i + 1 < args.size()) {
+            config.fs_tag = args[i + 1];
+            i++;
+        } else if (args[i] == "--metrics-port" && i + 1 < args.size()) {
+            config.metrics_port = static_cast<uint16_t>(std::stoul(args[i + 1]));
+            i++;
+        } else if (args[i] == "--dashboard") {
+            config.enable_dashboard = true;
         } else if (args[i] == "--headless") {
             config.headless = true;
         } else if (args[i] == "--gdb" && i + 1 < args.size()) {
@@ -326,6 +358,47 @@ int CLI::handle_stats(const std::vector<std::string>& args) {
     std::cout << "[LIME] Querying runtime statistics for: " << path << std::endl;
     std::cout << "Status: Idle / Dynamic Compute Footprint Active" << std::endl;
     return 0;
+}
+
+int CLI::handle_snapshot(const std::vector<std::string>& args) {
+    if (args.size() < 3) {
+        std::cerr << "Usage: lime snapshot <save|restore> <image> <snapshot_file>" << std::endl;
+        return 1;
+    }
+
+    std::string subcmd = args[0];
+    std::string image_path = args[1];
+    std::string snap_path = args[2];
+
+    VMConfig config;
+    config.ram_size_mb = 256;
+    config.sparse_disk_path = image_path;
+    config.headless = true;
+
+    VirtualMachine vm(config);
+    if (!vm.init()) {
+        std::cerr << "[LIME] Failed to initialize VM for snapshot operation." << std::endl;
+        return 1;
+    }
+
+    if (subcmd == "save") {
+        if (!vm.save_snapshot(snap_path)) {
+            std::cerr << "[LIME] Failed to save snapshot to: " << snap_path << std::endl;
+            return 1;
+        }
+        std::cout << "[LIME] Successfully saved snapshot to: " << snap_path << std::endl;
+        return 0;
+    } else if (subcmd == "restore") {
+        if (!vm.load_snapshot(snap_path)) {
+            std::cerr << "[LIME] Failed to restore snapshot from: " << snap_path << std::endl;
+            return 1;
+        }
+        std::cout << "[LIME] Successfully restored snapshot from: " << snap_path << std::endl;
+        return 0;
+    } else {
+        std::cerr << "Unknown snapshot subcommand: " << subcmd << " (expected 'save' or 'restore')" << std::endl;
+        return 1;
+    }
 }
 
 }

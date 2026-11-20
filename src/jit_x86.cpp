@@ -280,12 +280,13 @@ NativeBlock* X86JIT::compile_new(const BasicBlock& bb) {
 
     for (size_t i = 0; i < n; ++i) {
         const MicroOp& op = bb.ops[i];
-        const uint64_t inst_pc = block_pc + i * 4;
+        const uint64_t inst_pc = op.inst_pc != 0 ? op.inst_pc : (block_pc + i * 4);
+        const uint8_t op_len = op.len != 0 ? op.len : 4;
         const uint32_t funct3 = (op.raw_inst >> 12) & 0x7;
         const uint32_t funct7 = (op.raw_inst >> 25) & 0x7F;
 
         if ((op.raw_inst & 0x3) != 0x3) {
-            // Compressed instruction: interpreter (block fetch is 4-byte wide).
+            // Compressed instruction: interpreter fallback if unexpanded.
             emit_fallback(a, inst_pc, op.raw_inst, abort_label);
             fallback_count++;
             continue;
@@ -332,7 +333,7 @@ NativeBlock* X86JIT::compile_new(const BasicBlock& bb) {
                             (((op.raw_inst >> 20) & 0x01) << 11) |
                             (((op.raw_inst >> 21) & 0x3FF) << 1);
             if (op.rd != 0) {
-                a.mov(kScratch, Imm(static_cast<int64_t>(inst_pc + 4)));
+                a.mov(kScratch, Imm(static_cast<int64_t>(inst_pc + op_len)));
                 store_reg(a, op.rd, kScratch);
             }
             a.mov(x86::qword_ptr(kHostPc), Imm(static_cast<int64_t>(inst_pc + static_cast<uint64_t>(imm_j))));
@@ -347,7 +348,7 @@ NativeBlock* X86JIT::compile_new(const BasicBlock& bb) {
             a.and_(kScratch, Imm(-2));
             a.mov(kScratch2, kScratch);
             if (op.rd != 0) {
-                a.mov(kScratch, Imm(static_cast<int64_t>(inst_pc + 4)));
+                a.mov(kScratch, Imm(static_cast<int64_t>(inst_pc + op_len)));
                 store_reg(a, op.rd, kScratch);
             }
             a.mov(x86::qword_ptr(kHostPc), kScratch2);
@@ -368,7 +369,7 @@ NativeBlock* X86JIT::compile_new(const BasicBlock& bb) {
 
             Label taken = a.new_label();
             a.j(branch_cond(funct3), taken);
-            a.mov(x86::qword_ptr(kHostPc), Imm(static_cast<int64_t>(inst_pc + 4)));
+            a.mov(x86::qword_ptr(kHostPc), Imm(static_cast<int64_t>(inst_pc + op_len)));
             a.jmp(end_label);
             a.bind(taken);
             a.mov(x86::qword_ptr(kHostPc), Imm(static_cast<int64_t>(inst_pc + static_cast<uint64_t>(imm_b))));
@@ -389,7 +390,8 @@ NativeBlock* X86JIT::compile_new(const BasicBlock& bb) {
 
     // Sequential exit: advance pc past the block when no terminator owns it.
     if (!terminator_handled) {
-        a.mov(x86::qword_ptr(kHostPc), Imm(static_cast<int64_t>(block_pc + 4 * n)));
+        uint64_t next_pc = bb.fallthrough_pc != 0 ? bb.fallthrough_pc : (block_pc + 4 * n);
+        a.mov(x86::qword_ptr(kHostPc), Imm(static_cast<int64_t>(next_pc)));
     }
 
     a.bind(end_label);
@@ -452,7 +454,8 @@ NativeBlock* X86JIT::compile_new(const BasicBlock& bb) {
 
     for (size_t i = 0; i < n; ++i) {
         const MicroOp& op = bb.ops[i];
-        const uint64_t inst_pc = block_pc + i * 4;
+        const uint64_t inst_pc = op.inst_pc != 0 ? op.inst_pc : (block_pc + i * 4);
+        const uint8_t op_len = op.len != 0 ? op.len : 4;
         const uint32_t funct3 = (op.raw_inst >> 12) & 0x7;
         const uint32_t funct7 = (op.raw_inst >> 25) & 0x7F;
 
@@ -477,7 +480,7 @@ NativeBlock* X86JIT::compile_new(const BasicBlock& bb) {
         }
         case 0x6F: { // JAL
             if (op.rd != 0) {
-                a.mov(kScratch, static_cast<int64_t>(inst_pc + 4));
+                a.mov(kScratch, static_cast<int64_t>(inst_pc + op_len));
                 store_reg(a, op.rd, kScratch);
             }
             a.mov(kScratch, static_cast<int64_t>(inst_pc + op.imm));
@@ -492,7 +495,7 @@ NativeBlock* X86JIT::compile_new(const BasicBlock& bb) {
             if (op.imm != 0) a.add(kScratch, kScratch, op.imm);
             a.and_(kScratch, kScratch, ~1ULL);
             if (op.rd != 0) {
-                a.mov(kScratch2, static_cast<int64_t>(inst_pc + 4));
+                a.mov(kScratch2, static_cast<int64_t>(inst_pc + op_len));
                 store_reg(a, op.rd, kScratch2);
             }
             a.str(kScratch, a64::ptr(kHostPc));
@@ -629,7 +632,8 @@ NativeBlock* X86JIT::compile_new(const BasicBlock& bb) {
     }
 
     if (!terminator_handled) {
-        a.mov(kScratch, static_cast<int64_t>(block_pc + n * 4));
+        uint64_t next_pc = bb.fallthrough_pc != 0 ? bb.fallthrough_pc : (block_pc + n * 4);
+        a.mov(kScratch, static_cast<int64_t>(next_pc));
         a.str(kScratch, a64::ptr(kHostPc));
     }
 

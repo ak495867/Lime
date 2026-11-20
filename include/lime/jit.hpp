@@ -20,10 +20,13 @@ struct MicroOp {
     uint32_t rs1;
     uint32_t rs2;
     int32_t imm;
+    uint8_t len{4};
+    uint64_t inst_pc{0};
 };
 
 struct BasicBlock {
     uint64_t start_pc;
+    uint64_t fallthrough_pc{0};
     std::vector<MicroOp> ops;
     size_t execute_count{0};
     std::function<bool(VCPU&, size_t&)> executor;
@@ -35,7 +38,7 @@ public:
     ~JITEngine() = default;
 
     void clear_cache();
-    const BasicBlock* lookup_or_compile(uint64_t pc, const std::vector<uint32_t>& instructions);
+    const BasicBlock* lookup_or_compile(uint64_t pc, const std::vector<uint32_t>& instructions, const std::vector<uint8_t>& lens = {});
     void invalidate_page(uint64_t gpa);
 
     size_t compiled_blocks_count() const;

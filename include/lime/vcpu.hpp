@@ -74,6 +74,13 @@ public:
     uint64_t lr_addr() const { return lr_addr_; }
 
     bool execute_compressed(uint16_t inst);
+    static uint32_t expand_rvc(uint16_t c_inst);
+
+    // Snapshot state accessors & mutators
+    const std::array<uint64_t, 32>& regs() const { return regs_; }
+    void set_all_regs(const std::array<uint64_t, 32>& regs) { regs_ = regs; }
+    const std::unordered_map<uint32_t, uint64_t>& csrs() const { return csrs_; }
+    void set_all_csrs(const std::unordered_map<uint32_t, uint64_t>& csrs) { csrs_ = csrs; }
 
     // Native JIT access: exposed for the asmjit backend, tests, and tooling.
     uint64_t* regs_ptr() { return regs_.data(); }
@@ -109,6 +116,7 @@ private:
 
     bool lr_valid_{false};
     uint64_t lr_addr_{0};
+    uint8_t curr_inst_len_{4};
 };
 
 }

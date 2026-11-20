@@ -362,9 +362,33 @@ void VirtIONetDevice::stop_worker() {
 }
 
 void VirtIONetDevice::send_frame_async(const std::vector<uint8_t>& frame, std::function<void(bool)> callback) {
-    std::lock_guard<std::mutex> lock(frame_mutex_);
-    pending_frames_.push({frame, callback});
+    {
+        std::lock_guard<std::mutex> lock(frame_mutex_);
+        pending_frames_.push({frame, callback});
+        if (tx_handler_) {
+            tx_handler_(frame);
+        }
+    }
     cv_.notify_one();
+}
+
+void VirtIONetDevice::receive_frame(const std::vector<uint8_t>& frame) {
+    std::lock_guard<std::mutex> lock(frame_mutex_);
+    rx_frames_.push(frame);
+    packets_recv_++;
+}
+
+void VirtIONetDevice::set_tx_handler(std::function<void(const std::vector<uint8_t>&)> handler) {
+    std::lock_guard<std::mutex> lock(frame_mutex_);
+    tx_handler_ = handler;
+}
+
+std::vector<uint8_t> VirtIONetDevice::pop_rx_frame() {
+    std::lock_guard<std::mutex> lock(frame_mutex_);
+    if (rx_frames_.empty()) return {};
+    auto f = rx_frames_.front();
+    rx_frames_.pop();
+    return f;
 }
 
 uint32_t VirtIONetDevice::read(uint64_t offset, size_t) {

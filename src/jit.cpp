@@ -7,7 +7,7 @@ void JITEngine::clear_cache() {
     block_cache_.clear();
 }
 
-const BasicBlock* JITEngine::lookup_or_compile(uint64_t pc, const std::vector<uint32_t>& instructions) {
+const BasicBlock* JITEngine::lookup_or_compile(uint64_t pc, const std::vector<uint32_t>& instructions, const std::vector<uint8_t>& lens) {
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = block_cache_.find(pc);
     if (it != block_cache_.end()) {
@@ -18,7 +18,11 @@ const BasicBlock* JITEngine::lookup_or_compile(uint64_t pc, const std::vector<ui
     BasicBlock bb;
     bb.start_pc = pc;
 
-    for (uint32_t inst : instructions) {
+    uint64_t curr_pc = pc;
+    for (size_t i = 0; i < instructions.size(); ++i) {
+        uint32_t inst = instructions[i];
+        uint8_t len = (i < lens.size() && lens[i] != 0) ? lens[i] : 4;
+
         MicroOp op;
         op.raw_inst = inst;
         op.opcode = inst & 0x7F;
@@ -26,12 +30,17 @@ const BasicBlock* JITEngine::lookup_or_compile(uint64_t pc, const std::vector<ui
         op.rs1 = (inst >> 15) & 0x1F;
         op.rs2 = (inst >> 20) & 0x1F;
         op.imm = static_cast<int32_t>(inst) >> 20;
+        op.len = len;
+        op.inst_pc = curr_pc;
         bb.ops.push_back(op);
+
+        curr_pc += len;
 
         if (op.opcode == 0x6F || op.opcode == 0x67 || op.opcode == 0x63 || op.opcode == 0x73) {
             break;
         }
     }
+    bb.fallthrough_pc = curr_pc;
 
     auto insert_res = block_cache_.emplace(pc, std::move(bb));
     insert_res.first->second.execute_count = 1;

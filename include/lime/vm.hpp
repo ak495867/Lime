@@ -44,6 +44,12 @@ struct VMConfig {
     bool headless{false};
     bool use_hardware_hypervisor{false};
     uint16_t gdb_port{0};
+    std::string fs_host_path;
+    std::string fs_tag{"limefs"};
+    bool enable_user_net{false};
+    std::vector<std::pair<uint16_t, uint16_t>> hostfwd;
+    uint16_t metrics_port{0};
+    bool enable_dashboard{false};
 };
 
 class GDBStub;
@@ -59,6 +65,11 @@ public:
 
     void run();
     void stop();
+
+    bool save_snapshot(const std::string& snapshot_path);
+    bool load_snapshot(const std::string& snapshot_path);
+
+    std::string generate_prometheus_metrics() const;
 
     ResourceMetrics get_metrics() const;
 

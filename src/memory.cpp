@@ -213,4 +213,27 @@ size_t MemoryManager::page_size() const {
     return page_size_;
 }
 
+void MemoryManager::dump_allocated_pages(std::vector<std::pair<uint64_t, std::vector<uint8_t>>>& out) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    out.clear();
+    out.reserve(pages_.size());
+    for (const auto& [idx, data] : pages_) {
+        out.emplace_back(idx, data);
+    }
+}
+
+void MemoryManager::restore_page(uint64_t page_index, const std::vector<uint8_t>& data) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    pages_[page_index] = data;
+    page_table_[page_index].allocated = true;
+    page_table_[page_index].dirty = true;
+    page_table_[page_index].last_accessed = ++access_counter_;
+}
+
+void MemoryManager::clear_all_pages() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    pages_.clear();
+    page_table_.clear();
+}
+
 }

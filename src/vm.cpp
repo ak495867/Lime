@@ -1,5 +1,7 @@
 #include "lime/vm.hpp"
 #include "lime/gdb_stub.hpp"
+#include "lime/fs.hpp"
+#include "lime/jit_x86.hpp"
 #include <iostream>
 #include <thread>
 #include <chrono>
@@ -64,13 +66,25 @@ bool VirtualMachine::init() {
     if (!config_.sparse_disk_path.empty() &&
         !initialize_storage(config_.sparse_disk_path, config_.delta_disk_path)) return false;
 
+    if (!config_.fs_host_path.empty()) {
+        auto fs_dev = std::make_shared<VirtIOFSDevice>(memory_, 0x10006000, config_.fs_host_path, config_.fs_tag);
+        bus_->register_device(fs_dev);
+    }
+
     if (config_.enable_net) {
         net_device_ = std::make_shared<VirtIONetDevice>(memory_, 0x10002000);
         bus_->register_device(net_device_);
         net_device_->start_worker();
 
-        net_bridge_ = std::make_shared<HostNetBridge>(net_device_);
-        if (!net_bridge_->start_bridge(8888)) return false;
+        if (config_.enable_user_net) {
+            auto user_net = std::make_shared<UserNetStack>(net_device_);
+            for (const auto& [hp, gp] : config_.hostfwd) {
+                user_net->add_port_forward(hp, gp, "tcp");
+            }
+        } else {
+            net_bridge_ = std::make_shared<HostNetBridge>(net_device_);
+            if (!net_bridge_->start_bridge(8888)) return false;
+        }
     }
 
     balloon_device_ = std::make_shared<VirtIOBalloonDevice>(memory_, 0x10003000);
@@ -136,17 +150,29 @@ bool VirtualMachine::initialize_storage(const std::string& base_path, const std:
         active_disk_ = cow_disk_;
     } else {
         bool is_sparse = false;
+        bool is_qcow2 = false;
         if (std::filesystem::exists(base_path)) {
             std::ifstream probe(base_path, std::ios::binary);
-            char magic[4]{};
-            if (probe.read(magic, 4) && std::memcmp(magic, "LIME", 4) == 0) {
-                is_sparse = true;
+            uint8_t magic[4]{};
+            if (probe.read(reinterpret_cast<char*>(magic), 4)) {
+                if (std::memcmp(magic, "LIME", 4) == 0) {
+                    is_sparse = true;
+                } else if (magic[0] == 'Q' && magic[1] == 'F' && magic[2] == 'I' && magic[3] == 0xFB) {
+                    is_qcow2 = true;
+                }
             }
         } else {
             is_sparse = true;
         }
 
-        if (is_sparse) {
+        if (is_qcow2) {
+            auto qcow = std::make_shared<QCOW2Disk>();
+            if (!qcow->open(base_path)) {
+                std::cerr << "[LIME] Failed to open QCOW2 disk image: " << base_path << std::endl;
+                return false;
+            }
+            active_disk_ = qcow;
+        } else if (is_sparse) {
             disk_ = std::make_shared<SparseDisk>();
             if (!disk_->open(base_path)) {
                 if (std::filesystem::exists(base_path) ||
@@ -335,6 +361,192 @@ ResourceMetrics VirtualMachine::get_metrics() const {
         return scheduler_->metrics();
     }
     return ResourceMetrics{};
+}
+
+bool VirtualMachine::save_snapshot(const std::string& snapshot_path) {
+    if (!memory_) return false;
+
+    std::ofstream out(snapshot_path, std::ios::binary | std::ios::trunc);
+    if (!out.is_open()) return false;
+
+    const char magic[8] = {'L', 'I', 'M', 'E', 'S', 'N', 'A', 'P'};
+    out.write(magic, 8);
+
+    uint32_t version = 1;
+    out.write(reinterpret_cast<const char*>(&version), sizeof(version));
+
+    uint32_t arch = static_cast<uint32_t>(config_.target_arch);
+    out.write(reinterpret_cast<const char*>(&arch), sizeof(arch));
+
+    uint32_t num_vcpus = static_cast<uint32_t>(vcpus_.size());
+    out.write(reinterpret_cast<const char*>(&num_vcpus), sizeof(num_vcpus));
+
+    for (const auto& vcpu : vcpus_) {
+        const auto& regs = vcpu->regs();
+        out.write(reinterpret_cast<const char*>(regs.data()), regs.size() * sizeof(uint64_t));
+
+        uint64_t pc = vcpu->get_pc();
+        out.write(reinterpret_cast<const char*>(&pc), sizeof(pc));
+
+        uint32_t mode = static_cast<uint32_t>(vcpu->privilege_mode());
+        out.write(reinterpret_cast<const char*>(&mode), sizeof(mode));
+
+        uint32_t state = static_cast<uint32_t>(vcpu->state());
+        out.write(reinterpret_cast<const char*>(&state), sizeof(state));
+
+        const auto& csrs = vcpu->csrs();
+        uint32_t csr_count = static_cast<uint32_t>(csrs.size());
+        out.write(reinterpret_cast<const char*>(&csr_count), sizeof(csr_count));
+
+        for (const auto& [id, val] : csrs) {
+            out.write(reinterpret_cast<const char*>(&id), sizeof(id));
+            out.write(reinterpret_cast<const char*>(&val), sizeof(val));
+        }
+    }
+
+    // Memory pages
+    uint64_t ram_cap = memory_->total_capacity_bytes();
+    out.write(reinterpret_cast<const char*>(&ram_cap), sizeof(ram_cap));
+
+    uint32_t page_sz = static_cast<uint32_t>(memory_->page_size());
+    out.write(reinterpret_cast<const char*>(&page_sz), sizeof(page_sz));
+
+    std::vector<std::pair<uint64_t, std::vector<uint8_t>>> dumped_pages;
+    memory_->dump_allocated_pages(dumped_pages);
+
+    uint64_t page_count = static_cast<uint64_t>(dumped_pages.size());
+    out.write(reinterpret_cast<const char*>(&page_count), sizeof(page_count));
+
+    for (const auto& [page_idx, data] : dumped_pages) {
+        out.write(reinterpret_cast<const char*>(&page_idx), sizeof(page_idx));
+        out.write(reinterpret_cast<const char*>(data.data()), data.size());
+    }
+
+    out.close();
+    return true;
+}
+
+bool VirtualMachine::load_snapshot(const std::string& snapshot_path) {
+    if (!memory_) return false;
+
+    std::ifstream in(snapshot_path, std::ios::binary);
+    if (!in.is_open()) return false;
+
+    char magic[8]{};
+    in.read(magic, 8);
+    if (std::memcmp(magic, "LIMESNAP", 8) != 0) return false;
+
+    uint32_t version = 0;
+    in.read(reinterpret_cast<char*>(&version), sizeof(version));
+    if (version != 1) return false;
+
+    uint32_t arch = 0;
+    in.read(reinterpret_cast<char*>(&arch), sizeof(arch));
+
+    uint32_t num_vcpus = 0;
+    in.read(reinterpret_cast<char*>(&num_vcpus), sizeof(num_vcpus));
+
+    for (uint32_t i = 0; i < num_vcpus; ++i) {
+        std::array<uint64_t, 32> regs{};
+        in.read(reinterpret_cast<char*>(regs.data()), regs.size() * sizeof(uint64_t));
+
+        uint64_t pc = 0;
+        in.read(reinterpret_cast<char*>(&pc), sizeof(pc));
+
+        uint32_t mode = 0;
+        in.read(reinterpret_cast<char*>(&mode), sizeof(mode));
+
+        uint32_t state = 0;
+        in.read(reinterpret_cast<char*>(&state), sizeof(state));
+
+        uint32_t csr_count = 0;
+        in.read(reinterpret_cast<char*>(&csr_count), sizeof(csr_count));
+
+        std::unordered_map<uint32_t, uint64_t> csrs;
+        for (uint32_t j = 0; j < csr_count; ++j) {
+            uint32_t id = 0;
+            uint64_t val = 0;
+            in.read(reinterpret_cast<char*>(&id), sizeof(id));
+            in.read(reinterpret_cast<char*>(&val), sizeof(val));
+            csrs[id] = val;
+        }
+
+        if (i < vcpus_.size()) {
+            vcpus_[i]->set_all_regs(regs);
+            vcpus_[i]->set_pc(pc);
+            vcpus_[i]->set_privilege_mode(static_cast<PrivilegeMode>(mode));
+            vcpus_[i]->set_state(static_cast<VCPUState>(state));
+            vcpus_[i]->set_all_csrs(csrs);
+        }
+    }
+
+    uint64_t ram_cap = 0;
+    in.read(reinterpret_cast<char*>(&ram_cap), sizeof(ram_cap));
+
+    uint32_t page_sz = 0;
+    in.read(reinterpret_cast<char*>(&page_sz), sizeof(page_sz));
+
+    uint64_t page_count = 0;
+    in.read(reinterpret_cast<char*>(&page_count), sizeof(page_count));
+
+    memory_->clear_all_pages();
+    for (uint64_t i = 0; i < page_count; ++i) {
+        uint64_t page_idx = 0;
+        in.read(reinterpret_cast<char*>(&page_idx), sizeof(page_idx));
+
+        std::vector<uint8_t> data(page_sz);
+        in.read(reinterpret_cast<char*>(data.data()), page_sz);
+
+        memory_->restore_page(page_idx, data);
+    }
+
+    return true;
+}
+
+std::string VirtualMachine::generate_prometheus_metrics() const {
+    std::string out;
+    uint64_t total_cycles = 0;
+    for (const auto& vcpu : vcpus_) {
+        total_cycles += vcpu->total_cycles();
+    }
+    out += "# HELP lime_cpu_cycles_total Total virtual CPU cycles executed\n";
+    out += "# TYPE lime_cpu_cycles_total counter\n";
+    out += "lime_cpu_cycles_total " + std::to_string(total_cycles) + "\n";
+
+    size_t jit_blocks = 0;
+    if (vcpu_ && vcpu_->native_jit()) {
+        jit_blocks = vcpu_->native_jit()->block_count();
+    }
+    out += "# HELP lime_jit_blocks_total Total compiled native JIT basic blocks\n";
+    out += "# TYPE lime_jit_blocks_total counter\n";
+    out += "lime_jit_blocks_total " + std::to_string(jit_blocks) + "\n";
+
+    size_t mem_alloc = memory_ ? memory_->allocated_bytes() : 0;
+    out += "# HELP lime_memory_allocated_bytes Allocated physical RAM in bytes\n";
+    out += "# TYPE lime_memory_allocated_bytes gauge\n";
+    out += "lime_memory_allocated_bytes " + std::to_string(mem_alloc) + "\n";
+
+    size_t mem_cap = memory_ ? memory_->total_capacity_bytes() : 0;
+    out += "# HELP lime_memory_capacity_bytes Total RAM capacity in bytes\n";
+    out += "# TYPE lime_memory_capacity_bytes gauge\n";
+    out += "lime_memory_capacity_bytes " + std::to_string(mem_cap) + "\n";
+
+    uint64_t disk_cap = active_disk_ ? active_disk_->capacity_bytes() : 0;
+    out += "# HELP lime_disk_capacity_bytes Active virtual disk capacity in bytes\n";
+    out += "# TYPE lime_disk_capacity_bytes gauge\n";
+    out += "lime_disk_capacity_bytes " + std::to_string(disk_cap) + "\n";
+
+    uint64_t pkts_sent = net_device_ ? net_device_->packets_sent() : 0;
+    out += "# HELP lime_net_packets_sent_total Packets sent by virtual network\n";
+    out += "# TYPE lime_net_packets_sent_total counter\n";
+    out += "lime_net_packets_sent_total " + std::to_string(pkts_sent) + "\n";
+
+    uint64_t pkts_recv = net_device_ ? net_device_->packets_recv() : 0;
+    out += "# HELP lime_net_packets_recv_total Packets received by virtual network\n";
+    out += "# TYPE lime_net_packets_recv_total counter\n";
+    out += "lime_net_packets_recv_total " + std::to_string(pkts_recv) + "\n";
+
+    return out;
 }
 
 std::shared_ptr<MemoryManager> VirtualMachine::memory() const { return memory_; }
