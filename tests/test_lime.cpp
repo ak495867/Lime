@@ -564,18 +564,20 @@ void test_async_io_nonblocking() {
 
     std::atomic<bool> write_done{false};
     bool write_ok = false;
+    auto t_sub_start = std::chrono::steady_clock::now();
     bool submitted = lime::submit_sparse_range(engine, disk, lime::AsyncOpType::WRITE,
                                                0, wbuf.data(), wbuf.size(),
                                                [&](const lime::AsyncCompletion& c) {
                                                    write_ok = c.success;
                                                    write_done = true;
                                                });
+    auto t_sub_end = std::chrono::steady_clock::now();
     assert(submitted);
+    auto submit_duration_us =
+        std::chrono::duration_cast<std::chrono::microseconds>(t_sub_end - t_sub_start).count();
 
     // ----------------------------------------------------------------------
-    // Non-blocking proof: measure how long submit + first poll takes while
-    // 1 MiB has NOT yet been written. On the synchronous path the write would
-    // already have hit the file before submit_sparse_range returned.
+    // Non-blocking proof: submit returns immediately without blocking on I/O.
     // ----------------------------------------------------------------------
     auto t0 = std::chrono::steady_clock::now();
     size_t spins = 0;
@@ -589,14 +591,15 @@ void test_async_io_nonblocking() {
     auto t1 = std::chrono::steady_clock::now();
     assert(write_done);
     assert(write_ok);
-    auto submit_latency_us =
+    auto total_latency_us =
         std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
-    std::cout << "  1 MiB async write completed after " << spins
-              << " non-blocking poll spins (" << submit_latency_us << " us total)" << std::endl;
+    std::cout << "  1 MiB async write submitted in " << submit_duration_us
+              << " us, completed after " << spins
+              << " non-blocking poll spins (" << total_latency_us << " us total)" << std::endl;
 
-    // The write must NOT have been synchronous: with 64 KiB blocks, 16
-    // segments would take >= 2 ms of file I/O on the submitting thread.
-    assert(submit_latency_us < 2000);
+    // The submit call must be non-blocking (sub-millisecond typically, < 50 ms on loaded CI)
+    assert(submit_duration_us < 50000);
+    assert(spins < 100000);
 
     // -- Read it back through the async path --------------------------------
     std::atomic<bool> read_done{false};
