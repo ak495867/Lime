@@ -639,7 +639,7 @@ NativeBlock* X86JIT::compile_new(const BasicBlock& bb) {
     a.ldr(kHostPc, a64::ptr_post(a64::sp, 16));
     a.ldp(kHostCpu, kHostRegs, a64::ptr_post(a64::sp, 32));
     a.ldp(a64::x29, a64::x30, a64::ptr_post(a64::sp, 32));
-    a.ret();
+    a.ret(a64::x30);
 
     void* fn = nullptr;
     if (impl_->rt.add(&fn, &code) != kErrorOk) return nullptr;
