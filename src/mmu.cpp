@@ -93,7 +93,18 @@ bool MMU::walk_sv39(uint64_t va, AccessType access, PrivilegeMode mode, uint64_t
             if (mode == PrivilegeMode::SUPERVISOR && u) return false;
 
             uint64_t ppn = (pte >> 10) & 0x000FFFFFFFFFFFFFULL;
-            out_pa = (ppn << 12) | page_offset;
+            if (i == 2) {
+                if (ppn & 0x3FFFF) return false;
+                out_pa = (ppn << 12) | (va & 0x3FFFFFFFULL);
+            } else if (i == 1) {
+                if (ppn & 0x1FF) return false;
+                out_pa = (ppn << 12) | (va & 0x1FFFFFULL);
+            } else {
+                out_pa = (ppn << 12) | (va & 0xFFFULL);
+            }
+            fault_info.writeable = w;
+            fault_info.user_access = u;
+            fault_info.execute_disable = !x;
             return true;
         }
 

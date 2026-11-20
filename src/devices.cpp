@@ -158,33 +158,150 @@ void VirtIOBlockDevice::tick() {
     }
 }
 
+void VirtIOBlockDevice::process_virtqueue() {
+    if (!mem_ || !disk_ || vq_pfn_ == 0) return;
+
+    // Layout of split virtqueue:
+    // Descriptors: vq_addr
+    // Avail ring:   vq_addr + queue_num_ * 16
+    // Used ring:    align_up(avail_end, queue_align_)
+    uint64_t vq_addr = static_cast<uint64_t>(vq_pfn_) * queue_align_;
+    uint64_t desc_table_addr = vq_addr;
+    uint64_t avail_addr = desc_table_addr + static_cast<uint64_t>(queue_num_) * 16;
+    uint64_t avail_end = avail_addr + 4 + static_cast<uint64_t>(queue_num_) * 2;
+    uint64_t used_addr = (avail_end + queue_align_ - 1) & ~(static_cast<uint64_t>(queue_align_) - 1);
+
+    uint16_t avail_idx = mem_->read16(avail_addr + 2);
+
+    while (last_avail_idx_ != avail_idx) {
+        uint16_t ring_idx = last_avail_idx_ % queue_num_;
+        uint16_t head_desc = mem_->read16(avail_addr + 4 + ring_idx * 2);
+
+        uint16_t cur_desc = head_desc;
+        uint32_t total_written = 0;
+        uint8_t status = 0; // VIRTIO_BLK_S_OK
+
+        struct VirtioBlkReq {
+            uint32_t type;
+            uint32_t reserved;
+            uint64_t sector;
+        } req_hdr{};
+
+        bool have_req = false;
+        uint64_t status_addr = 0;
+        int safety_limit = queue_num_ * 2;
+
+        while (safety_limit-- > 0) {
+            uint64_t d_addr = desc_table_addr + cur_desc * 16;
+            uint64_t buf_addr = mem_->read64(d_addr);
+            uint32_t buf_len = mem_->read32(d_addr + 8);
+            uint16_t flags = mem_->read16(d_addr + 12);
+            uint16_t next = mem_->read16(d_addr + 14);
+
+            if (!have_req && buf_len >= 16) {
+                req_hdr.type = mem_->read32(buf_addr);
+                req_hdr.reserved = mem_->read32(buf_addr + 4);
+                req_hdr.sector = mem_->read64(buf_addr + 8);
+                have_req = true;
+            } else if (flags & 0x02) {
+                // Device-writable buffer: data for READ or 1-byte status
+                if (buf_len == 1 && (flags & 0x01) == 0) {
+                    status_addr = buf_addr;
+                } else if (req_hdr.type == 0) { // READ
+                    uint32_t sectors = buf_len / 512;
+                    std::vector<uint8_t> tmp(buf_len, 0);
+                    if (sectors > 0) {
+                        bool ok = disk_->read_sectors(req_hdr.sector, sectors, tmp.data());
+                        if (!ok) status = 1; // VIRTIO_BLK_S_IOERR
+                    }
+                    mem_->write_bytes(buf_addr, tmp.data(), buf_len);
+                    total_written += buf_len;
+                    req_hdr.sector += sectors;
+                } else {
+                    status_addr = buf_addr;
+                }
+            } else {
+                // Device-readable buffer: data for WRITE
+                if (req_hdr.type == 1) { // WRITE
+                    uint32_t sectors = buf_len / 512;
+                    std::vector<uint8_t> tmp(buf_len);
+                    mem_->read_bytes(buf_addr, tmp.data(), buf_len);
+                    if (sectors > 0) {
+                        bool ok = disk_->write_sectors(req_hdr.sector, sectors, tmp.data());
+                        if (!ok) status = 1;
+                    }
+                    req_hdr.sector += sectors;
+                }
+            }
+
+            if (!(flags & 0x01)) break;
+            cur_desc = next;
+        }
+
+        if (status_addr != 0) {
+            mem_->write8(status_addr, status);
+            total_written += 1;
+        }
+
+        uint16_t used_idx = mem_->read16(used_addr + 2);
+        uint16_t used_ring_entry = used_idx % queue_num_;
+        uint64_t elem_addr = used_addr + 4 + used_ring_entry * 8;
+        mem_->write32(elem_addr, head_desc);
+        mem_->write32(elem_addr + 4, total_written);
+
+        mem_->write16(used_addr + 2, used_idx + 1);
+        last_avail_idx_++;
+    }
+
+    interrupt_status_ |= 0x1;
+}
+
 uint32_t VirtIOBlockDevice::read(uint64_t offset, size_t) {
     switch (offset) {
-    case 0x00: return 0x74726976;
-    case 0x04: return 2;
-    case 0x08: return 2;
+    case 0x00: return 0x74726976; // 'virt'
+    case 0x04: return 2;          // Version 2
+    case 0x08: return 2;          // Device ID 2 = Block
+    case 0x0C: return 0x4c494d45; // Vendor ID 'LIME'
+    case 0x10: return 0;          // HostFeatures
+    case 0x34: return queue_num_; // QueueNumMax
+    case 0x44: return (vq_pfn_ != 0) ? 1 : 0; // QueueReady
+    case 0x60: return interrupt_status_;
     case 0x70: return status_;
-    case 0x80: return disk_ ? static_cast<uint32_t>(disk_->capacity_bytes() / 512) : 0;
+    case 0x80:
+    case 0x100: return disk_ ? static_cast<uint32_t>(disk_->capacity_bytes() / 512) : 0;
+    case 0x84:
+    case 0x104: return disk_ ? static_cast<uint32_t>((disk_->capacity_bytes() / 512) >> 32) : 0;
     default: return 0;
     }
 }
 
 void VirtIOBlockDevice::write(uint64_t offset, uint32_t value, size_t) {
     switch (offset) {
+    case 0x14: /* HostFeaturesSel */ break;
+    case 0x20: /* GuestFeatures */ break;
+    case 0x24: /* GuestFeaturesSel */ break;
+    case 0x28: /* GuestPageSize */ break;
+    case 0x30: queue_sel_ = value; break;
+    case 0x38: queue_num_ = (value != 0) ? value : 128; break;
+    case 0x3c: queue_align_ = (value != 0) ? value : 4096; break;
     case 0x40:
         vq_pfn_ = value;
         break;
     case 0x50:
-        // Handle virtqueue doorbell
-        if (mem_ && disk_) {
-            uint64_t vq_addr = static_cast<uint64_t>(vq_pfn_) * 4096;
-            // A full implementation would parse vring_avail, follow vring_desc, and submit async reads/writes
-            // and then update vring_used. We trigger the async worker here in the full flow.
-            cv_.notify_one();
+        if (value == 0 || value == queue_sel_) {
+            process_virtqueue();
         }
+        break;
+    case 0x64:
+        interrupt_status_ &= ~value;
         break;
     case 0x70:
         status_ = value;
+        if (status_ == 0) {
+            last_avail_idx_ = 0;
+            interrupt_status_ = 0;
+            vq_pfn_ = 0;
+        }
         break;
     case 0x84:
         current_lba_ = (current_lba_ & 0xFFFFFFFF00000000ULL) | value;

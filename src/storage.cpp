@@ -306,4 +306,90 @@ bool SparseDisk::is_open() const {
     return is_open_;
 }
 
+RawDisk::~RawDisk() {
+    close();
+}
+
+bool RawDisk::open(const std::string& path, bool read_only) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    close();
+
+    std::ios_base::openmode mode = std::ios::binary | std::ios::in;
+    if (!read_only) mode |= std::ios::out;
+    file_.open(path, mode);
+    if (!file_.is_open() && !read_only) {
+        file_.open(path, std::ios::binary | std::ios::in);
+        read_only = true;
+    }
+    if (!file_.is_open()) return false;
+
+    file_.seekg(0, std::ios::end);
+    std::streampos size = file_.tellg();
+    if (size < 0) {
+        file_.close();
+        return false;
+    }
+    capacity_ = static_cast<uint64_t>(size);
+    path_ = path;
+    read_only_ = read_only;
+    is_open_ = true;
+    return true;
+}
+
+void RawDisk::close() {
+    if (file_.is_open()) {
+        file_.flush();
+        file_.close();
+    }
+    is_open_ = false;
+    capacity_ = 0;
+}
+
+bool RawDisk::create(const std::string& path, uint64_t capacity_bytes) {
+    std::ofstream f(path, std::ios::binary | std::ios::trunc);
+    if (!f.is_open()) return false;
+    if (capacity_bytes > 0) {
+        f.seekp(capacity_bytes - 1);
+        f.put('\0');
+    }
+    return f.good();
+}
+
+bool RawDisk::read_sectors(uint64_t lba, uint32_t sector_count, void* buffer) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!is_open_ || !buffer) return false;
+    if (lba > UINT64_MAX / SECTOR_SIZE) return false;
+    uint64_t offset = lba * SECTOR_SIZE;
+    if (sector_count > (UINT64_MAX - offset) / SECTOR_SIZE) return false;
+    uint64_t bytes = static_cast<uint64_t>(sector_count) * SECTOR_SIZE;
+    if (offset > capacity_ || bytes > capacity_ - offset) return false;
+
+    file_.seekg(static_cast<std::streamoff>(offset), std::ios::beg);
+    file_.read(static_cast<char*>(buffer), static_cast<std::streamsize>(bytes));
+    return file_.good() || file_.gcount() == static_cast<std::streamsize>(bytes);
+}
+
+bool RawDisk::write_sectors(uint64_t lba, uint32_t sector_count, const void* buffer) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!is_open_ || !buffer || read_only_) return false;
+    if (lba > UINT64_MAX / SECTOR_SIZE) return false;
+    uint64_t offset = lba * SECTOR_SIZE;
+    if (sector_count > (UINT64_MAX - offset) / SECTOR_SIZE) return false;
+    uint64_t bytes = static_cast<uint64_t>(sector_count) * SECTOR_SIZE;
+    if (offset > capacity_ || bytes > capacity_ - offset) return false;
+
+    file_.seekp(static_cast<std::streamoff>(offset), std::ios::beg);
+    file_.write(static_cast<const char*>(buffer), static_cast<std::streamsize>(bytes));
+    file_.flush();
+    return file_.good();
+}
+
+uint64_t RawDisk::capacity_bytes() const {
+    return capacity_;
+}
+
+bool RawDisk::is_open() const {
+    return is_open_;
+}
+
 }

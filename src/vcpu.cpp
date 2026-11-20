@@ -72,6 +72,9 @@ uint64_t VCPU::get_csr(uint32_t csr_addr) const {
 
 void VCPU::set_csr(uint32_t csr_addr, uint64_t val) {
     csrs_[csr_addr] = val;
+    if (csr_addr == 0x180 && mmu_) {
+        mmu_->invalidate_tlb();
+    }
 }
 
 VCPUState VCPU::state() const {
@@ -472,6 +475,7 @@ void VCPU::execute_instruction(uint32_t inst) {
 
     case 0x73: {
         if (funct3 == 0) {
+            uint32_t funct7 = (inst >> 25) & 0x7F;
             if (imm_i == 0) {
                 csrs_[0x342] = 8;
                 csrs_[0x341] = pc_ - 4;
@@ -479,6 +483,21 @@ void VCPU::execute_instruction(uint32_t inst) {
                 state_ = VCPUState::HALTED;
             } else if (imm_i == 0x105) {
                 state_ = VCPUState::IDLE_WAIT;
+            } else if (funct7 == 0x09) { // SFENCE.VMA
+                if (mmu_) {
+                    uint64_t va = get_reg(rs1);
+                    mmu_->invalidate_tlb(rs1 == 0 ? 0 : va);
+                }
+            } else if (imm_i == 0x302) { // MRET
+                pc_ = get_csr(0x341);
+                uint64_t mstatus = get_csr(0x300);
+                uint64_t mpp = (mstatus >> 11) & 3;
+                mode_ = static_cast<PrivilegeMode>(mpp);
+            } else if (imm_i == 0x102) { // SRET
+                pc_ = get_csr(0x141);
+                uint64_t sstatus = get_csr(0x100);
+                uint64_t spp = (sstatus >> 8) & 1;
+                mode_ = static_cast<PrivilegeMode>(spp);
             }
         } else {
             uint32_t csr_addr = imm_i & 0xFFF;

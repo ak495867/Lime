@@ -112,8 +112,15 @@ private:
     uint64_t base_addr_;
     uint32_t status_{0};
     uint32_t vq_pfn_{0};
+    uint32_t queue_sel_{0};
+    uint32_t queue_num_{128};
+    uint32_t queue_align_{4096};
+    uint32_t interrupt_status_{0};
+    uint16_t last_avail_idx_{0};
     uint64_t current_lba_{0};
     uint32_t sector_count_{0};
+
+    void process_virtqueue();
 
     struct AsyncRequest {
         enum class OpType { READ, WRITE };

@@ -93,6 +93,31 @@ private:
     mutable std::mutex lru_mutex_;
 };
 
+class RawDisk : public BlockStorage {
+public:
+    static constexpr uint32_t SECTOR_SIZE = BlockStorage::SECTOR_SIZE;
+
+    RawDisk() = default;
+    ~RawDisk() override;
+
+    bool open(const std::string& path, bool read_only = false);
+    void close();
+    static bool create(const std::string& path, uint64_t capacity_bytes);
+
+    bool read_sectors(uint64_t lba, uint32_t sector_count, void* buffer) override;
+    bool write_sectors(uint64_t lba, uint32_t sector_count, const void* buffer) override;
+    uint64_t capacity_bytes() const override;
+    bool is_open() const override;
+
+private:
+    std::string path_;
+    mutable std::fstream file_;
+    uint64_t capacity_{0};
+    bool read_only_{false};
+    bool is_open_{false};
+    mutable std::mutex mutex_;
+};
+
 }
 
 #endif

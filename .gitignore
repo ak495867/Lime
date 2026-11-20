@@ -5,6 +5,7 @@
 *.log
 .vs/
 build/
+build_cmake/
 bin/
 
 # Compiled Linux/macOS binaries

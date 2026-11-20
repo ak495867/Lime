@@ -25,6 +25,8 @@ public:
     
     static std::vector<uint8_t> create_dummy_uefi_header();
     
+    static std::vector<uint8_t> generate_dtb(uint64_t ram_size, const std::string& cmdline, uint64_t initrd_start = 0, uint64_t initrd_size = 0);
+
 private:
     static bool generate_fdt(std::shared_ptr<MemoryManager> mem, uint64_t fdt_gpa, const std::string& cmdline, uint64_t initrd_start, uint64_t initrd_size);
 };

@@ -17,6 +17,7 @@
 #include "lime/vm.hpp"
 #include "lime/jit_x86.hpp"
 #include "lime/async_io.hpp"
+#include "lime/gdb_stub.hpp"
 #include <iostream>
 #include <cassert>
 #include <chrono>
@@ -718,6 +719,199 @@ void test_full_vm_extensions() {
     std::cout << "[TEST PASSED] Complete Enterprise Extensions VM Runtime" << std::endl << std::flush;
 }
 
+void test_raw_flat_disk() {
+    const std::string raw_path = "test_raw_disk.img";
+    if (std::filesystem::exists(raw_path)) std::filesystem::remove(raw_path);
+
+    assert(lime::RawDisk::create(raw_path, 1024 * 1024));
+
+    lime::RawDisk disk;
+    assert(disk.open(raw_path));
+    assert(disk.is_open());
+    assert(disk.capacity_bytes() == 1024 * 1024);
+
+    std::vector<uint8_t> write_buf(512 * 2, 0x42);
+    assert(disk.write_sectors(10, 2, write_buf.data()));
+
+    std::vector<uint8_t> read_buf(512 * 2, 0);
+    assert(disk.read_sectors(10, 2, read_buf.data()));
+    assert(read_buf == write_buf);
+
+    disk.close();
+    std::filesystem::remove(raw_path);
+    std::cout << "[TEST PASSED] Flat Raw Disk Subsystem" << std::endl << std::flush;
+}
+
+void test_binary_fdt_dtb() {
+    auto dtb = lime::FirmwareLoader::generate_dtb(512 * 1024 * 1024, "console=hvc0 root=/dev/vda", 0x82000000, 0x100000);
+    assert(dtb.size() >= 40);
+
+    // Verify DTB magic (0xd00dfeed)
+    assert(dtb[0] == 0xd0 && dtb[1] == 0x0d && dtb[2] == 0xfe && dtb[3] == 0xed);
+
+    // Verify totalsize matches
+    uint32_t totalsize = (static_cast<uint32_t>(dtb[4]) << 24) |
+                         (static_cast<uint32_t>(dtb[5]) << 16) |
+                         (static_cast<uint32_t>(dtb[6]) << 8)  |
+                         static_cast<uint32_t>(dtb[7]);
+    assert(totalsize == dtb.size());
+
+    // Search for expected nodes and properties in DTB data
+    std::string dtb_str(reinterpret_cast<const char*>(dtb.data()), dtb.size());
+    assert(dtb_str.find("riscv-virtio") != std::string::npos);
+    assert(dtb_str.find("lime,riscv-virt") != std::string::npos);
+    assert(dtb_str.find("console=hvc0 root=/dev/vda") != std::string::npos);
+    assert(dtb_str.find("rv64gc") != std::string::npos);
+    assert(dtb_str.find("riscv,sv39") != std::string::npos);
+    assert(dtb_str.find("virtio,mmio") != std::string::npos);
+    assert(dtb_str.find("ns16550a") != std::string::npos);
+
+    std::cout << "[TEST PASSED] Binary Flattened Device Tree (DTB/FDT) Generator" << std::endl << std::flush;
+}
+
+void test_virtio_split_queue() {
+    auto mem = std::make_shared<lime::MemoryManager>(16 * 1024 * 1024, 4096);
+    const std::string test_disk = "test_virtio_raw.img";
+    if (std::filesystem::exists(test_disk)) std::filesystem::remove(test_disk);
+
+    assert(lime::RawDisk::create(test_disk, 64 * 1024));
+    auto disk = std::make_shared<lime::RawDisk>();
+    assert(disk->open(test_disk));
+
+    lime::VirtIOBlockDevice blk(disk, mem, 0x10001000);
+
+    // Check device identification
+    assert(blk.read(0x00, 4) == 0x74726976); // 'virt'
+    assert(blk.read(0x04, 4) == 2);          // version 2
+    assert(blk.read(0x08, 4) == 2);          // device ID 2 = block
+
+    // Setup split queue configuration: queue_num=16, queue_align=4096, PFN=2 (GPA 0x2000)
+    blk.write(0x30, 0, 4);    // QueueSel = 0
+    blk.write(0x38, 16, 4);   // QueueNum = 16
+    blk.write(0x3C, 4096, 4); // QueueAlign = 4096
+    blk.write(0x40, 2, 4);    // QueuePFN = 2 -> GPA 0x2000
+
+    // Split virtqueue layout at GPA 0x2000:
+    // Descriptors (16 * 16 = 256 bytes): 0x2000 .. 0x20FF
+    // Avail ring (4 + 16 * 2 = 36 bytes): 0x2100 .. 0x2123
+    // Used ring (aligned to 4096): 0x3000
+    //
+    // Setup Write Request:
+    // Desc 0: Req Header at GPA 0x4000 (16 bytes, flags=NEXT) -> next=1
+    // Desc 1: Data Buffer at GPA 0x4100 (512 bytes, flags=NEXT) -> next=2
+    // Desc 2: Status Byte at GPA 0x4300 (1 byte, flags=WRITE) -> next=0
+    auto write_desc = [&](uint16_t idx, uint64_t addr, uint32_t len, uint16_t flags, uint16_t next) {
+        uint64_t d_gpa = 0x2000 + idx * 16;
+        mem->write64(d_gpa, addr);
+        mem->write32(d_gpa + 8, len);
+        mem->write16(d_gpa + 12, flags);
+        mem->write16(d_gpa + 14, next);
+    };
+
+    write_desc(0, 0x4000, 16, 1, 1);
+    write_desc(1, 0x4100, 512, 1, 2);
+    write_desc(2, 0x4300, 1, 2, 0);
+
+    // Populate Write Header: type=1 (WRITE), reserved=0, sector=3
+    mem->write32(0x4000, 1);
+    mem->write32(0x4004, 0);
+    mem->write64(0x4008, 3);
+
+    // Populate Data Buffer with pattern 0x7E
+    std::vector<uint8_t> data_in(512, 0x7E);
+    mem->write_bytes(0x4100, data_in.data(), 512);
+
+    // Avail ring: idx=1, ring[0]=0
+    mem->write16(0x2100, 0); // flags
+    mem->write16(0x2102, 1); // avail->idx
+    mem->write16(0x2104, 0); // ring[0] = head desc 0
+
+    // Ring doorbell (write to QueueNotify 0x50)
+    blk.write(0x50, 0, 4);
+
+    // Check status byte written back by device
+    assert(mem->read8(0x4300) == 0); // VIRTIO_BLK_S_OK
+    assert(mem->read16(0x3002) == 1); // used->idx incremented to 1
+    assert(blk.read(0x60, 4) & 1);   // interrupt status asserted
+
+    // Now Setup Read Request back from sector 3:
+    // Desc 0: Req Header at GPA 0x4000 (type=0 READ, sector=3)
+    // Desc 1: Data Buffer at GPA 0x4100 (flags = NEXT | WRITE)
+    // Desc 2: Status Byte at GPA 0x4300
+    mem->write32(0x4000, 0); // type = 0 (READ)
+    write_desc(1, 0x4100, 512, 3, 2); // flags = NEXT | WRITE
+
+    // Zero out memory buffer
+    std::vector<uint8_t> zeroes(512, 0);
+    mem->write_bytes(0x4100, zeroes.data(), 512);
+
+    // Avail ring: idx=2, ring[1]=0
+    mem->write16(0x2102, 2); // avail->idx
+    mem->write16(0x2106, 0); // ring[1] = head desc 0
+
+    // Ring doorbell
+    blk.write(0x50, 0, 4);
+
+    assert(mem->read8(0x4300) == 0); // OK
+    assert(mem->read16(0x3002) == 2); // used->idx incremented to 2
+
+    // Read back data from buffer: should match 0x7E written earlier!
+    std::vector<uint8_t> data_out(512, 0);
+    mem->read_bytes(0x4100, data_out.data(), 512);
+    assert(data_out == data_in);
+
+    disk->close();
+    std::filesystem::remove(test_disk);
+    std::cout << "[TEST PASSED] VirtIO Split Virtqueue Request Processing" << std::endl << std::flush;
+}
+
+void test_gdb_remote_protocol() {
+    // 1. Checksum calculations
+    assert(lime::GDBStub::calculate_checksum("?") == 0x3F);
+    assert(lime::GDBStub::calculate_checksum("OK") == 0x9A);
+
+    // 2. Packet formatting
+    assert(lime::GDBStub::format_packet("OK") == "$OK#9a");
+    assert(lime::GDBStub::format_packet("?") == "$?#3f");
+
+    // 3. Packet parsing
+    std::string out_data;
+    assert(lime::GDBStub::parse_packet("$qSupported#37", out_data));
+    assert(out_data == "qSupported");
+
+    // 4. Command processing on VCPU and Memory
+    auto mem = std::make_shared<lime::MemoryManager>(16 * 1024 * 1024, 4096);
+    auto bus = std::make_shared<lime::DeviceBus>();
+    auto vcpu = std::make_shared<lime::VCPU>(0, mem, bus);
+    vcpu->reset(0x80000000);
+    vcpu->set_reg(1, 0x12345678AABBCCDDULL);
+
+    lime::GDBStub gdb(vcpu, mem, 54321);
+
+    // Test ? (halt reason)
+    assert(gdb.process_command("?") == "S05");
+
+    // Test qSupported
+    assert(gdb.process_command("qSupported").find("PacketSize=") != std::string::npos);
+
+    // Test 'g' (read all registers)
+    std::string regs = gdb.process_command("g");
+    assert(regs.size() == 33 * 16); // 32 GPRs + PC, 8 bytes each = 16 hex chars each
+
+    // Test 'm' and 'M' (read and write memory)
+    assert(gdb.process_command("M1000,4:01020304") == "OK");
+    assert(mem->read32(0x1000) == 0x04030201);
+    assert(gdb.process_command("m1000,4") == "01020304");
+
+    // Test Breakpoints (Z0 and z0)
+    assert(gdb.process_command("Z0,80000010,4") == "OK");
+    assert(gdb.has_breakpoint(0x80000010));
+    assert(gdb.process_command("z0,80000010,4") == "OK");
+    assert(!gdb.has_breakpoint(0x80000010));
+
+    std::cout << "[TEST PASSED] GDB Remote Serial Protocol Stub" << std::endl << std::flush;
+}
+
 int main() {
     std::cout << "Starting Test Suite Execution..." << std::endl << std::flush;
     test_memory_subsystem();
@@ -728,6 +922,10 @@ int main() {
     test_x86_decoder_suite();
     test_native_jit();
     test_async_io_nonblocking();
+    test_raw_flat_disk();
+    test_binary_fdt_dtb();
+    test_virtio_split_queue();
+    test_gdb_remote_protocol();
     test_full_vm_extensions();
     std::cout << "\nALL UNIVERSAL LIME EXTENSION TESTS PASSED SUCCESSFULLY!" << std::endl << std::flush;
     return 0;

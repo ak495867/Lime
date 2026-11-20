@@ -7,7 +7,65 @@
 #include <algorithm>
 #include <cctype>
 
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#else
+#include <termios.h>
+#include <unistd.h>
+#endif
+
 namespace lime {
+
+namespace {
+
+class TerminalRawMode {
+public:
+    TerminalRawMode() {
+#if defined(_WIN32)
+        hIn_ = GetStdHandle(STD_INPUT_HANDLE);
+        if (hIn_ != INVALID_HANDLE_VALUE && GetConsoleMode(hIn_, &orig_mode_)) {
+            DWORD raw = orig_mode_ & ~(ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT);
+            SetConsoleMode(hIn_, raw);
+            active_ = true;
+        }
+#else
+        if (isatty(STDIN_FILENO) && tcgetattr(STDIN_FILENO, &orig_termios_) == 0) {
+            struct termios raw = orig_termios_;
+            raw.c_lflag &= ~(ECHO | ICANON);
+            tcsetattr(STDIN_FILENO, TCSANOW, &raw);
+            active_ = true;
+        }
+#endif
+    }
+
+    ~TerminalRawMode() {
+        restore();
+    }
+
+    void restore() {
+        if (!active_) return;
+#if defined(_WIN32)
+        SetConsoleMode(hIn_, orig_mode_);
+#else
+        tcsetattr(STDIN_FILENO, TCSANOW, &orig_termios_);
+#endif
+        active_ = false;
+    }
+
+private:
+    bool active_{false};
+#if defined(_WIN32)
+    HANDLE hIn_{INVALID_HANDLE_VALUE};
+    DWORD orig_mode_{0};
+#else
+    struct termios orig_termios_{};
+#endif
+};
+
+} // namespace
 
 int CLI::run(int argc, char** argv) {
     if (argc < 2) {
@@ -56,6 +114,12 @@ void CLI::print_usage() {
               << "  --cpu <count|auto>   vCPU count [default: auto]\n"
               << "  --policy <policy>    Allocation policy (aggressive|balanced|lazy) [default: balanced]\n"
               << "  --overlay <delta>    CoW delta overlay image\n"
+              << "  --kernel <path>      Direct Linux kernel payload (ELF or Image)\n"
+              << "  --initrd <path>      Initial ramdisk image\n"
+              << "  --cmdline <string>   Kernel boot arguments\n"
+              << "  --firmware <path>    UEFI / custom firmware image\n"
+              << "  --gdb <port>         Listen for GDB remote debugging connections\n"
+              << "  --hardware-vt        Attempt host hardware hypervisor acceleration\n"
               << "  --net                Enable virtual VirtIO network & socket bridge\n"
               << "  --headless           Run without interactive graphics\n"
               << std::endl;
@@ -133,6 +197,9 @@ int CLI::handle_run(const std::vector<std::string>& args) {
             config.enable_net = true;
         } else if (args[i] == "--headless") {
             config.headless = true;
+        } else if (args[i] == "--gdb" && i + 1 < args.size()) {
+            config.gdb_port = static_cast<uint16_t>(std::stoul(args[i + 1]));
+            i++;
         }
     }
 
@@ -161,8 +228,14 @@ int CLI::handle_run(const std::vector<std::string>& args) {
         return 1;
     }
 
+    std::unique_ptr<TerminalRawMode> raw_term;
+    if (!config.headless) {
+        raw_term = std::make_unique<TerminalRawMode>();
+    }
+
     std::cout << "[LIME] Booting guest execution engine..." << std::endl;
     vm.run();
+    raw_term.reset();
 
     ResourceMetrics m = vm.get_metrics();
     std::cout << "\n[LIME] VM Execution Terminated." << std::endl;

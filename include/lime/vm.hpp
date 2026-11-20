@@ -43,7 +43,10 @@ struct VMConfig {
     bool enable_acpi{true};
     bool headless{false};
     bool use_hardware_hypervisor{false};
+    uint16_t gdb_port{0};
 };
+
+class GDBStub;
 
 class VirtualMachine {
 public:
@@ -70,6 +73,7 @@ public:
     std::shared_ptr<ResourceScheduler> scheduler() const;
     std::shared_ptr<HostHypervisor> hypervisor() const;
     std::shared_ptr<AsyncIOEngine> async_io() const;
+    std::shared_ptr<GDBStub> gdb_stub() const;
     const VMConfig& config() const;
 
 private:
@@ -85,6 +89,7 @@ private:
     std::shared_ptr<X86CPUDecoder> x86_vcpu_;
     std::shared_ptr<ResourceScheduler> scheduler_;
     std::shared_ptr<HostHypervisor> hypervisor_;
+    std::shared_ptr<GDBStub> gdb_stub_;
     std::shared_ptr<AsyncIOEngine> async_io_;  // declared last: destroyed first
     std::shared_ptr<ClintDevice> clint_;
     std::shared_ptr<PlicDevice> plic_;

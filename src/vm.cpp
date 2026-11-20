@@ -1,4 +1,5 @@
 #include "lime/vm.hpp"
+#include "lime/gdb_stub.hpp"
 #include <iostream>
 #include <thread>
 #include <chrono>
@@ -109,6 +110,11 @@ bool VirtualMachine::init() {
         scheduler_ = std::make_shared<ResourceScheduler>(vcpu_, memory_, config_.policy);
     }
 
+    if (config_.gdb_port > 0 && vcpu_) {
+        gdb_stub_ = std::make_shared<GDBStub>(vcpu_, memory_, config_.gdb_port);
+        gdb_stub_->start();
+    }
+
     return true;
 }
 
@@ -129,16 +135,36 @@ bool VirtualMachine::initialize_storage(const std::string& base_path, const std:
         }
         active_disk_ = cow_disk_;
     } else {
-        disk_ = std::make_shared<SparseDisk>();
-        if (!disk_->open(base_path)) {
-            if (std::filesystem::exists(base_path) ||
-                !SparseDisk::create(base_path, 10ULL * 1024 * 1024 * 1024) ||
-                !disk_->open(base_path)) {
-                std::cerr << "[LIME] Failed to open or create disk image: " << base_path << std::endl;
+        bool is_sparse = false;
+        if (std::filesystem::exists(base_path)) {
+            std::ifstream probe(base_path, std::ios::binary);
+            char magic[4]{};
+            if (probe.read(magic, 4) && std::memcmp(magic, "LIME", 4) == 0) {
+                is_sparse = true;
+            }
+        } else {
+            is_sparse = true;
+        }
+
+        if (is_sparse) {
+            disk_ = std::make_shared<SparseDisk>();
+            if (!disk_->open(base_path)) {
+                if (std::filesystem::exists(base_path) ||
+                    !SparseDisk::create(base_path, 10ULL * 1024 * 1024 * 1024) ||
+                    !disk_->open(base_path)) {
+                    std::cerr << "[LIME] Failed to open or create disk image: " << base_path << std::endl;
+                    return false;
+                }
+            }
+            active_disk_ = disk_;
+        } else {
+            auto raw = std::make_shared<RawDisk>();
+            if (!raw->open(base_path)) {
+                std::cerr << "[LIME] Failed to open raw disk image: " << base_path << std::endl;
                 return false;
             }
+            active_disk_ = raw;
         }
-        active_disk_ = disk_;
 
         async_io_ = AsyncIOEngine::create_best();
         if (async_io_ && !async_io_->open(base_path)) async_io_.reset();
@@ -202,7 +228,28 @@ void VirtualMachine::run() {
         gpu_device_->start_display(input_device_);
     }
 
-    if (config_.target_arch == TargetArch::X86_64) {
+    if (gdb_stub_ && gdb_stub_->is_connected() && vcpu_) {
+        while (running_) {
+            if (!gdb_stub_->handle_client()) break;
+            if (gdb_stub_->is_single_step()) {
+                vcpu_->step();
+                bus_->tick_all();
+                gdb_stub_->notify_halt(5);
+            } else {
+                while (running_) {
+                    if (gdb_stub_->has_breakpoint(vcpu_->get_pc())) {
+                        gdb_stub_->notify_halt(5);
+                        break;
+                    }
+                    if (!vcpu_->step()) {
+                        gdb_stub_->notify_halt(5);
+                        break;
+                    }
+                    bus_->tick_all();
+                }
+            }
+        }
+    } else if (config_.target_arch == TargetArch::X86_64) {
         while (running_) {
             if (!x86_vcpu_ || !x86_vcpu_->step()) {
                 break;
@@ -300,6 +347,7 @@ std::shared_ptr<X86CPUDecoder> VirtualMachine::x86_vcpu() const { return x86_vcp
 std::shared_ptr<ResourceScheduler> VirtualMachine::scheduler() const { return scheduler_; }
 std::shared_ptr<HostHypervisor> VirtualMachine::hypervisor() const { return hypervisor_; }
 std::shared_ptr<AsyncIOEngine> VirtualMachine::async_io() const { return async_io_; }
+std::shared_ptr<GDBStub> VirtualMachine::gdb_stub() const { return gdb_stub_; }
 const VMConfig& VirtualMachine::config() const { return config_; }
 
 std::vector<std::shared_ptr<VCPU>> VirtualMachine::vcpus() const { return vcpus_; }

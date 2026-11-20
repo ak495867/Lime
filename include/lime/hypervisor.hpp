@@ -11,7 +11,8 @@ namespace lime {
 enum class HypervisorType {
     SOFTWARE_FALLBACK,
     WHPX_WINDOWS,
-    KVM_LINUX
+    KVM_LINUX,
+    HVF_MACOS
 };
 
 struct HypervisorCapabilities {
