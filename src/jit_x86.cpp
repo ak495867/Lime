@@ -7,7 +7,7 @@
 #include <vector>
 
 #if defined(__has_include)
-#if __has_include(<asmjit/core.h>) && __has_include(<asmjit/x86.h>)
+#if __has_include(<asmjit/core.h>) && __has_include(<asmjit/x86.h>) && (defined(__x86_64__) || defined(_M_X64))
 #define LIME_HAVE_ASMJIT 1
 #endif
 #endif
@@ -26,11 +26,11 @@ using namespace asmjit;
 namespace {
 
 // Host register plan inside emitted blocks:
-//   rbx = VCPU*,  rsi = regs base,  rdi = pc pointer  (callee-saved)
+//   rbx = VCPU*,  r12 = regs base,  r13 = pc pointer  (callee-saved on both Win64 and SysV)
 //   rax/rcx/rdx/r8..r11 = scratch (caller-saved, safe across helper calls)
 constexpr x86::Gp kHostCpu = x86::rbx;
-constexpr x86::Gp kHostRegs = x86::rsi;
-constexpr x86::Gp kHostPc = x86::rdi;
+constexpr x86::Gp kHostRegs = x86::r12;
+constexpr x86::Gp kHostPc = x86::r13;
 constexpr x86::Gp kScratch = x86::rax;
 constexpr x86::Gp kScratch2 = x86::r9;
 
@@ -49,9 +49,15 @@ inline void store_reg(x86::Assembler& a, uint32_t riscv_reg, const x86::Gp& src)
 }
 
 inline void emit_fallback(x86::Assembler& a, uint64_t inst_pc, uint32_t inst, const Label& abort_label) {
+#if defined(_WIN32)
     a.mov(x86::rcx, kHostCpu);  // helper arg 1: cpu
     a.mov(x86::rdx, Imm(static_cast<int64_t>(inst_pc)));
     a.mov(x86::r8d, Imm(static_cast<int32_t>(inst)));
+#else
+    a.mov(x86::rdi, kHostCpu);  // helper arg 1: cpu
+    a.mov(x86::rsi, Imm(static_cast<int64_t>(inst_pc)));
+    a.mov(x86::edx, Imm(static_cast<int32_t>(inst)));
+#endif
     a.mov(kScratch, Imm(reinterpret_cast<int64_t>(&lime_jit_execute_fallback)));
     a.call(kScratch);
     a.test(x86::al, x86::al);
@@ -186,7 +192,13 @@ struct X86JIT::Impl {
 X86JIT::X86JIT() : impl_(new Impl()) {}
 X86JIT::~X86JIT() = default;
 
-bool X86JIT::available() { return true; }
+bool X86JIT::available() {
+#if defined(__x86_64__) || defined(_M_X64)
+    return true;
+#else
+    return false;
+#endif
+}
 
 NativeBlock* X86JIT::compile_new(const BasicBlock& bb) {
     CodeHolder code;
@@ -197,14 +209,23 @@ NativeBlock* X86JIT::compile_new(const BasicBlock& bb) {
     const uint64_t block_pc = bb.start_pc;
     const size_t n = bb.ops.size();
 
-    // Prologue: save callee-saved hosts, stash args (Windows x64: rcx/rdx/r8).
+    // Prologue: save callee-saved hosts, stash args.
     a.push(x86::rbx);
-    a.push(x86::rsi);
-    a.push(x86::rdi);
-    a.sub(x86::rsp, 32);  // shadow space + alignment for helper calls
+    a.push(x86::r12);
+    a.push(x86::r13);
+#if defined(_WIN32)
+    // Windows x64: rcx/rdx/r8, 32-byte shadow space.
+    a.sub(x86::rsp, 32);
     a.mov(kHostCpu, x86::rcx);
     a.mov(kHostRegs, x86::rdx);
     a.mov(kHostPc, x86::r8);
+#else
+    // System V AMD64 (Linux / macOS): rdi/rsi/rdx.
+    // 3 pushes (24B) + return addr (8B) = 32B stack alignment.
+    a.mov(kHostCpu, x86::rdi);
+    a.mov(kHostRegs, x86::rsi);
+    a.mov(kHostPc, x86::rdx);
+#endif
 
     Label abort_label = a.new_label();
     Label end_label = a.new_label();
@@ -327,17 +348,21 @@ NativeBlock* X86JIT::compile_new(const BasicBlock& bb) {
     }
 
     a.bind(end_label);
+#if defined(_WIN32)
     a.add(x86::rsp, 32);
-    a.pop(x86::rdi);
-    a.pop(x86::rsi);
+#endif
+    a.pop(x86::r13);
+    a.pop(x86::r12);
     a.pop(x86::rbx);
     a.ret();
 
     // Abort path: leave immediately; pc was updated by the helper.
     a.bind(abort_label);
+#if defined(_WIN32)
     a.add(x86::rsp, 32);
-    a.pop(x86::rdi);
-    a.pop(x86::rsi);
+#endif
+    a.pop(x86::r13);
+    a.pop(x86::r12);
     a.pop(x86::rbx);
     a.ret();
 
