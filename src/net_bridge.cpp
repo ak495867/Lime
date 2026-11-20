@@ -1,5 +1,6 @@
 #include "lime/net_bridge.hpp"
 #include <iostream>
+#include <cstring>
 
 #if defined(_WIN32)
 #include <winsock2.h>
